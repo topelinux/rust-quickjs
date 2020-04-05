@@ -1,3 +1,4 @@
 target
+**/*.vi
 **/*.rs.bk
 Cargo.lock

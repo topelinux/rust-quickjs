@@ -14,8 +14,16 @@ use std::time::{Duration, Instant};
 use failure::Error;
 use foreign_types::ForeignTypeRef;
 use structopt::StructOpt;
+use foreign_types_shared::ForeignTypeRef as OtherForeignTypeRef;
+use std::io;
+use calloop::timer::Timer;
 
+use tokio::fs::File;
+use tokio::prelude::*;
 use qjs::{ffi, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value};
+
+use std::ptr::NonNull;
+use std::sync::mpsc::{Sender, channel};
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "qjs", about = "QuickJS stand alone interpreter")]
@@ -195,8 +203,30 @@ fn eval_buf<'a>(
     }
 }
 
+enum MsgType {
+    FS_READALL(String),
+}
+//use futures::executor::block_on;
+async fn test_fs(path: String)
+{
+    let mut file = match File::open(path).await {
+        Ok(file) => file,
+        Err(err) => {
+            println!("err is {}", err);
+            return;
+        },
+    };
+    let mut contents = vec![];
+    file.read_to_end(&mut contents).await.unwrap();
+
+    println!("Contents: {:?}", std::str::from_utf8(&contents));
+    println!("len = {}", contents.len());
+}
+
 fn main() -> Result<(), Error> {
     pretty_env_logger::init();
+
+    let (mut msg_tx, msg_rx) = channel::<MsgType>();
 
     let opt = Opt::from_clap(
         &Opt::clap()
@@ -219,6 +249,8 @@ fn main() -> Result<(), Error> {
         Runtime::new()
     };
     let ctxt = Context::new(&rt);
+
+    ctxt.set_userdata(NonNull::new(&mut msg_tx));
 
     // loader for ES6 modules
     rt.set_module_loader::<()>(None, Some(jsc_module_loader), None);
@@ -256,6 +288,42 @@ globalThis.os = os;
             )?;
         }
 
+        let mut event_rt = tokio::runtime::Builder::new().threaded_scheduler().build().unwrap();
+
+        let msg_tx_clone = msg_tx.clone();
+        let hello = ctxt
+            .new_c_function(
+                |ctxt, _this, args| {
+                    println!("I am in c function");
+                    let path = String::from(ctxt.to_cstring(&args[0]).unwrap().to_string_lossy());
+                    //.to_string_lossy();
+
+                    let msg_tx = ctxt.userdata::<Sender<MsgType>>().unwrap();
+                    unsafe {
+                        let rel = msg_tx.as_ref();
+                        rel.send(MsgType::FS_READALL(String::from(path)));
+                   //     //let ret = msg_tx.as_ref().send(MsgType::FS_READALL(String::from("/tmp/test.txt")));
+
+                   //     //match ret {
+                   //     //    Ok(_) => println!("send ok"),
+                   //     //    Err(err) => println!("err when send {}", err),
+                   //     //}
+                   }
+                    println!("after send");
+                    //let path = ctxt.to_cstring(&args[0]).unwrap().to_str().unwrap();
+                    //msg_tx_clone.send(MsgType::FS_READALL(String::from("/tmp/test.txt"))).unwrap();
+                    format!(
+                        "hello {}",
+                        ctxt.to_cstring(&args[0]).unwrap().to_string_lossy()
+                    )
+                },
+                Some("sayHello"),
+                1,
+            )
+            .unwrap();
+
+
+        ctxt.global_object().set_property("sayHello", hello).unwrap();
         let mut interactive = opt.interactive;
 
         let res = if let Some(expr) = opt.expr {
@@ -296,12 +364,25 @@ globalThis.os = os;
         }
 
         if interactive {
+            println!("interactive");
             ctxt.eval_binary(&*ffi::REPL, false)?;
+            ctxt.std_loop();
         }
 
-        ctxt.std_loop();
-    }
 
+        event_rt.block_on(async{
+            let msg = msg_rx.recv().unwrap();
+
+            match msg {
+                MsgType::FS_READALL(path) => {
+                    println!("path is {}", path);
+                    tokio::spawn(test_fs(path));
+                },
+            }
+            ctxt.std_loop();
+        });
+
+    }
     if opt.dump_memory {
         let stats = rt.memory_usage();
 
