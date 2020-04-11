@@ -37,6 +37,7 @@ fn patch_makefile(makefile: &Path) -> Result<(), Error> {
         content.into()
     };
 
+    let content = Regex::new("quickjs-libc.o")?.replace(&content, "quickjs-libc.o $(OBJDIR)/utils.o");
     let content = if cfg!(feature = "pic") {
         content
             .replace("CFLAGS+=$(DEFINES)\n", "CFLAGS+=$(DEFINES) -fPIC\n")
@@ -149,7 +150,8 @@ fn build_libquickjs() -> Result<(), Error> {
     );
     let libquickjs = format!("lib{}.a", quickjs);
     let mut targets = vec![libquickjs];
-
+    fs::copy("utils.c", QUICKJS_DIR.join("utils.c"))?;
+    fs::copy("utils.h", QUICKJS_DIR.join("utils.h"))?;
     if cfg!(feature = "repl") {
         targets.push(repl_c.to_owned());
     }
@@ -158,6 +160,7 @@ fn build_libquickjs() -> Result<(), Error> {
         targets.push(qjscalc_c.to_owned());
     }
 
+    targets.push("utils.c".to_owned());
     for target in &targets {
         if !QUICKJS_DIR.join(target).is_file() {
             println!("make {:?} ...", target);
@@ -205,10 +208,12 @@ fn gen_binding_files() -> Result<(), Error> {
 
     bindgen::builder()
         .header(QUICKJS_DIR.join("quickjs-libc.h").to_string_lossy())
+        .header(QUICKJS_DIR.join("utils.h").to_string_lossy())
         .clang_arg(format!("-I{}", QUICKJS_DIR.to_string_lossy()))
         .whitelist_var("JS_.*")
         .whitelist_type("JS.*")
-        .whitelist_function("(__)?(JS|JS|js)_.*")
+        .generate_inline_functions(true)
+        .whitelist_function("(__)?(JS|JS|js|RJS)_.*")
         .opaque_type("FILE")
         .blacklist_type("__.*")
         .default_enum_style(bindgen::EnumVariation::ModuleConsts)
@@ -226,9 +231,11 @@ fn gen_binding_files() -> Result<(), Error> {
 }
 
 fn main() -> Result<(), Error> {
+    println!("in buildrs");
     match &env::var("CARGO") {
         Ok(path) if path.ends_with("rls") => {}
         _ => {
+            println!("Before gen quickjs libray");
             build_libquickjs().context("build quickjs library")?;
             gen_binding_files().context("generate binding files")?;
         }

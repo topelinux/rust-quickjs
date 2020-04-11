@@ -2518,3 +2518,6 @@ extern "C" {
         flags: ::std::os::raw::c_int,
     );
 }
+extern "C" {
+    pub fn RJS_DupValue(ctx: *mut JSContext, v: JSValue) -> JSValue;
+}

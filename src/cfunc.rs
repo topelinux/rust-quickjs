@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// `CFunction` is a shortcut to easily add functions, setters and getters properties to a given object.
-pub type CFunction<T> = fn(&ContextRef, Option<&Value>, &[Value]) -> T;
+pub type CFunction<'a, T> = fn(&'a ContextRef, Option<&Value>, &[Value]) -> T;
 
 /// Unsafe C function
 pub type UnsafeCFunction = unsafe extern "C" fn(

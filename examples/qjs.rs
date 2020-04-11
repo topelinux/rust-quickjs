@@ -20,10 +20,10 @@ use calloop::timer::Timer;
 
 use tokio::fs::File;
 use tokio::prelude::*;
-use qjs::{ffi, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value};
+use qjs::{ffi, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value, NewValue, Args, EXCEPTION};
 
 use std::ptr::NonNull;
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{SyncSender, sync_channel};
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "qjs", about = "QuickJS stand alone interpreter")]
@@ -203,12 +203,17 @@ fn eval_buf<'a>(
     }
 }
 
-enum MsgType {
-    FS_READALL(String),
+enum MsgType<'a> {
+    FS_READALL(String, RJSPromise<'a>),
+}
+
+enum RespType {
+    FS_RESPONSE(Vec<u8>),
 }
 //use futures::executor::block_on;
-async fn test_fs(path: String)
+async fn test_fs(path: String, tx: SyncSender<RespType>)
 {
+    println!("path is {:?}", path);
     let mut file = match File::open(path).await {
         Ok(file) => file,
         Err(err) => {
@@ -218,15 +223,34 @@ async fn test_fs(path: String)
     };
     let mut contents = vec![];
     file.read_to_end(&mut contents).await.unwrap();
+    //println!("Contents in rust: {:?}", std::str::from_utf8(&contents));
 
-    println!("Contents: {:?}", std::str::from_utf8(&contents));
-    println!("len = {}", contents.len());
+    tx.send(RespType::FS_RESPONSE(contents));
+    //println!("Contents: {:?}", std::str::from_utf8(&contents));
+}
+
+struct RJSPromise<'a> {
+    ctxt: &'a ContextRef,
+    p: Local<'a, Value>,
+    resolve: Local<'a, Value>,
+    reject: Local<'a, Value>,
+}
+
+impl<'a> RJSPromise<'a> {
+    pub unsafe fn new(ctxt: &'a ContextRef, p: &Value, resolve: &Value, reject: &Value) -> Self {
+        Self {
+            ctxt,
+            p: ctxt.clone_value(p),
+            resolve: ctxt.clone_value(resolve),
+            reject: ctxt.clone_value(reject),
+        }
+    }
 }
 
 fn main() -> Result<(), Error> {
     pretty_env_logger::init();
 
-    let (mut msg_tx, msg_rx) = channel::<MsgType>();
+    let (mut msg_tx, msg_rx) = sync_channel::<MsgType>(2);
 
     let opt = Opt::from_clap(
         &Opt::clap()
@@ -296,26 +320,24 @@ globalThis.os = os;
                 |ctxt, _this, args| {
                     println!("I am in c function");
                     let path = String::from(ctxt.to_cstring(&args[0]).unwrap().to_string_lossy());
-                    //.to_string_lossy();
+                    let msg_tx = ctxt.userdata::<SyncSender<MsgType>>().unwrap();
 
-                    let msg_tx = ctxt.userdata::<Sender<MsgType>>().unwrap();
+                    let mut rfunc : [ffi::JSValue;2] = [ffi::UNDEFINED;2];
+                    let ret = unsafe {
+                        ffi::JS_NewPromiseCapability(ctxt.as_ptr(), rfunc.as_ptr() as *mut _)
+                    };
                     unsafe {
+                        let ret = RJSPromise::new(ctxt, &Value::from(ret), &Value::from(rfunc[0]), &Value::from(rfunc[1]));
+                    //    ffi::JS_Call(ctxt.as_ptr(), ret.resolve.raw(), ffi::NULL, 1 as i32, "hello".into_values(&ctxt).as_ptr() as *mut _);
                         let rel = msg_tx.as_ref();
-                        rel.send(MsgType::FS_READALL(String::from(path)));
-                   //     //let ret = msg_tx.as_ref().send(MsgType::FS_READALL(String::from("/tmp/test.txt")));
+                        rel.send(MsgType::FS_READALL(String::from(path), ret));
+                    }
+                    ret
+                    //format!(
+                    //    "hello {}",
+                    //    ctxt.to_cstring(&args[0]).unwrap().to_string_lossy()
+                    //);
 
-                   //     //match ret {
-                   //     //    Ok(_) => println!("send ok"),
-                   //     //    Err(err) => println!("err when send {}", err),
-                   //     //}
-                   }
-                    println!("after send");
-                    //let path = ctxt.to_cstring(&args[0]).unwrap().to_str().unwrap();
-                    //msg_tx_clone.send(MsgType::FS_READALL(String::from("/tmp/test.txt"))).unwrap();
-                    format!(
-                        "hello {}",
-                        ctxt.to_cstring(&args[0]).unwrap().to_string_lossy()
-                    )
                 },
                 Some("sayHello"),
                 1,
@@ -369,17 +391,46 @@ globalThis.os = os;
             ctxt.std_loop();
         }
 
+        let (resp_tx, resp_rx) = sync_channel::<RespType>(2);
+        let mut g_promise: Option<RJSPromise> = None;
 
+        let mut i = 1;
         event_rt.block_on(async{
-            let msg = msg_rx.recv().unwrap();
+            loop{
+                let msg = msg_rx.try_recv();
 
-            match msg {
-                MsgType::FS_READALL(path) => {
-                    println!("path is {}", path);
-                    tokio::spawn(test_fs(path));
-                },
+                match msg {
+                    Ok(MsgType::FS_READALL(path, promise)) => {
+                        g_promise = Some(promise);
+                        tokio::spawn(test_fs(path, resp_tx.clone()));
+                    },
+                    Err(_) => {},
+                }
+
+                let resp = resp_rx.try_recv();
+                match resp {
+                    Ok(RespType::FS_RESPONSE(content)) => {
+                        let promise = g_promise.take();
+                        match promise {
+                            Some(promise) => unsafe {
+                                    ffi::JS_Call(promise.ctxt.as_ptr(),
+                                    promise.resolve.raw(),
+                                    ffi::NULL,
+                                    1 as i32,
+                                    std::str::from_utf8(&content).unwrap().into_values(&promise.ctxt).as_ptr() as *mut _);
+                            },
+                            None => {},
+                        }
+                    },
+                    Err(_) => {}
+                }
+                i += 1;
+                if i >= 10 {
+                    break;
+                }
+                ctxt.std_loop();
+                std::thread::sleep(std::time::Duration::from_secs(2));
             }
-            ctxt.std_loop();
         });
 
     }

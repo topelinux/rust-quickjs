@@ -8,13 +8,14 @@ license = "MIT"
 keywords = ["javascript", "quickjs"]
 categories = ["api-bindings"]
 edition = "2018"
+build = "build.rs"
 
 [badges]
 appveyor = { repository = "flier/rust-quickjs", branch = "master", service = "github" }
 travis-ci = { repository = "flier/rust-quickjs", branch = "master" }
 
 [features]
-default = ["bignum", "repl", "qjscalc", "pic"]
+default = ["bignum", "repl", "qjscalc", "pic", "gen"]
 bignum = []
 repl = []
 qjscalc = ["bignum"]
