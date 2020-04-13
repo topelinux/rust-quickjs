@@ -15,12 +15,10 @@ use failure::Error;
 use foreign_types::ForeignTypeRef;
 use structopt::StructOpt;
 use foreign_types_shared::ForeignTypeRef as OtherForeignTypeRef;
-use std::io;
-use calloop::timer::Timer;
 
 use tokio::fs::File;
 use tokio::prelude::*;
-use qjs::{ffi, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value, NewValue, Args, EXCEPTION};
+use qjs::{ffi, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value, Args};
 
 use std::ptr::NonNull;
 use std::sync::mpsc::{SyncSender, sync_channel};
@@ -225,8 +223,7 @@ async fn test_fs(path: String, tx: SyncSender<RespType>)
     file.read_to_end(&mut contents).await.unwrap();
     //println!("Contents in rust: {:?}", std::str::from_utf8(&contents));
 
-    tx.send(RespType::FS_RESPONSE(contents));
-    //println!("Contents: {:?}", std::str::from_utf8(&contents));
+    tx.send(RespType::FS_RESPONSE(contents)).unwrap();
 }
 
 struct RJSPromise<'a> {
@@ -321,19 +318,18 @@ globalThis.os = os;
 
         let mut event_rt = tokio::runtime::Builder::new().threaded_scheduler().build().unwrap();
 
-        let msg_tx_clone = msg_tx.clone();
         let hello = ctxt
             .new_c_function(
                 |ctxt, _this, args| {
                     let path = String::from(ctxt.to_cstring(&args[0]).unwrap().to_string_lossy());
                     let msg_tx = ctxt.userdata::<SyncSender<MsgType>>().unwrap();
 
-                    let mut rfunc : [ffi::JSValue;2] = [ffi::UNDEFINED;2];
+                    let rfunc : [ffi::JSValue;2] = [ffi::UNDEFINED;2];
                     let ret = unsafe {
                         let promise = ffi::JS_NewPromiseCapability(ctxt.as_ptr(), rfunc.as_ptr() as *mut _);
                         let handle = RJSPromise::new(ctxt, &Value::from(promise), &Value::from(rfunc[0]), &Value::from(rfunc[1]));
                         let rel = msg_tx.as_ref();
-                        rel.send(MsgType::FS_READALL(String::from(path), handle));
+                        rel.send(MsgType::FS_READALL(String::from(path), handle)).unwrap();
                         promise
                     };
                     ret
@@ -399,7 +395,6 @@ globalThis.os = os;
         let (resp_tx, resp_rx) = sync_channel::<RespType>(2);
         let mut g_promise: Option<RJSPromise> = None;
 
-        let mut i = 1;
         event_rt.block_on(async{
             loop {
 
@@ -414,12 +409,13 @@ globalThis.os = os;
                         Err(_) => break,
                     }
                 }
+
+                //ctxt.std_loop();
                 loop {
                     if let Ok(None) = rt.execute_pending_job() {
                         break;
                     }
                 }
-                //ctxt.std_loop();
 
                 let resp = resp_rx.recv();
                 match resp {
