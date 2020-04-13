@@ -236,6 +236,13 @@ struct RJSPromise<'a> {
     reject: Local<'a, Value>,
 }
 
+impl <'a> Drop for RJSPromise<'a>
+{
+    fn drop(&mut self) {
+        self.ctxt.free_value(self.resolve.raw());
+        self.ctxt.free_value(self.reject.raw());
+    }
+}
 impl<'a> RJSPromise<'a> {
     pub unsafe fn new(ctxt: &'a ContextRef, p: &Value, resolve: &Value, reject: &Value) -> Self {
         Self {
@@ -318,21 +325,19 @@ globalThis.os = os;
         let hello = ctxt
             .new_c_function(
                 |ctxt, _this, args| {
-                    println!("I am in c function");
                     let path = String::from(ctxt.to_cstring(&args[0]).unwrap().to_string_lossy());
                     let msg_tx = ctxt.userdata::<SyncSender<MsgType>>().unwrap();
 
                     let mut rfunc : [ffi::JSValue;2] = [ffi::UNDEFINED;2];
                     let ret = unsafe {
-                        ffi::JS_NewPromiseCapability(ctxt.as_ptr(), rfunc.as_ptr() as *mut _)
-                    };
-                    unsafe {
-                        let ret = RJSPromise::new(ctxt, &Value::from(ret), &Value::from(rfunc[0]), &Value::from(rfunc[1]));
-                    //    ffi::JS_Call(ctxt.as_ptr(), ret.resolve.raw(), ffi::NULL, 1 as i32, "hello".into_values(&ctxt).as_ptr() as *mut _);
+                        let promise = ffi::JS_NewPromiseCapability(ctxt.as_ptr(), rfunc.as_ptr() as *mut _);
+                        let handle = RJSPromise::new(ctxt, &Value::from(promise), &Value::from(rfunc[0]), &Value::from(rfunc[1]));
                         let rel = msg_tx.as_ref();
-                        rel.send(MsgType::FS_READALL(String::from(path), ret));
-                    }
+                        rel.send(MsgType::FS_READALL(String::from(path), handle));
+                        promise
+                    };
                     ret
+                    //println!("refcount is {:?}", Value::from(rfunc[0]).ref_cnt());
                     //format!(
                     //    "hello {}",
                     //    ctxt.to_cstring(&args[0]).unwrap().to_string_lossy()
@@ -396,18 +401,27 @@ globalThis.os = os;
 
         let mut i = 1;
         event_rt.block_on(async{
-            loop{
-                let msg = msg_rx.try_recv();
+            loop {
 
-                match msg {
-                    Ok(MsgType::FS_READALL(path, promise)) => {
-                        g_promise = Some(promise);
-                        tokio::spawn(test_fs(path, resp_tx.clone()));
-                    },
-                    Err(_) => {},
+                loop {
+                    let msg = msg_rx.try_recv();
+
+                    match msg {
+                        Ok(MsgType::FS_READALL(path, promise)) => {
+                            g_promise = Some(promise);
+                            tokio::spawn(test_fs(path, resp_tx.clone()));
+                        },
+                        Err(_) => break,
+                    }
                 }
+                loop {
+                    if let Ok(None) = rt.execute_pending_job() {
+                        break;
+                    }
+                }
+                //ctxt.std_loop();
 
-                let resp = resp_rx.try_recv();
+                let resp = resp_rx.recv();
                 match resp {
                     Ok(RespType::FS_RESPONSE(content)) => {
                         let promise = g_promise.take();
@@ -424,12 +438,11 @@ globalThis.os = os;
                     },
                     Err(_) => {}
                 }
-                i += 1;
-                if i >= 10 {
-                    break;
-                }
-                ctxt.std_loop();
-                std::thread::sleep(std::time::Duration::from_secs(2));
+                //i += 1;
+                //if i >= 5 {
+                //    break;
+                //}
+                //std::thread::sleep(std::time::Duration::from_secs(2));
             }
         });
 
