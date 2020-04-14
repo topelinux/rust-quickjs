@@ -13,15 +13,19 @@ use std::time::{Duration, Instant};
 
 use failure::Error;
 use foreign_types::ForeignTypeRef;
-use structopt::StructOpt;
 use foreign_types_shared::ForeignTypeRef as OtherForeignTypeRef;
+use structopt::StructOpt;
 
+use qjs::{
+    ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value,
+};
 use tokio::fs::File;
 use tokio::prelude::*;
-use qjs::{ffi, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value, Args};
 
 use std::ptr::NonNull;
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::mpsc::{sync_channel, SyncSender};
+
+use std::error::Error as StdError;
 
 use std::collections::HashMap;
 
@@ -208,24 +212,24 @@ enum MsgType<'a> {
 }
 
 enum RespType {
-    FS_RESPONSE(u32, Vec<u8>),
+    FS_RESPONSE(u32, Result<Vec<u8>, Error>),
 }
 //use futures::executor::block_on;
-async fn test_fs(path: String, tx: SyncSender<RespType>, job_id: u32)
-{
+async fn test_fs(path: String, tx: SyncSender<RespType>, job_id: u32) {
     println!("path is {:?}", path);
     let mut file = match File::open(path).await {
         Ok(file) => file,
         Err(err) => {
             println!("err is {}", err);
+            tx.send(RespType::FS_RESPONSE(job_id, Err(err.into()))).unwrap();
             return;
-        },
+        }
     };
     let mut contents = vec![];
     file.read_to_end(&mut contents).await.unwrap();
     //println!("Contents in rust: {:?}", std::str::from_utf8(&contents));
 
-    tx.send(RespType::FS_RESPONSE(job_id, contents)).unwrap();
+    tx.send(RespType::FS_RESPONSE(job_id, Ok(contents))).unwrap();
 }
 
 struct RJSPromise<'a> {
@@ -235,8 +239,7 @@ struct RJSPromise<'a> {
     reject: Local<'a, Value>,
 }
 
-impl <'a> Drop for RJSPromise<'a>
-{
+impl<'a> Drop for RJSPromise<'a> {
     fn drop(&mut self) {
         self.ctxt.free_value(self.resolve.raw());
         self.ctxt.free_value(self.reject.raw());
@@ -318,7 +321,10 @@ globalThis.os = os;
             )?;
         }
 
-        let mut event_rt = tokio::runtime::Builder::new().threaded_scheduler().build().unwrap();
+        let mut event_rt = tokio::runtime::Builder::new()
+            .threaded_scheduler()
+            .build()
+            .unwrap();
 
         let hello = ctxt
             .new_c_function(
@@ -327,13 +333,20 @@ globalThis.os = os;
                     let msg_tx = ctxt.userdata::<SyncSender<MsgType>>().unwrap();
 
                     println!("In Rust Function path is {}", path);
-                    let rfunc : [ffi::JSValue;2] = [ffi::UNDEFINED;2];
+                    let rfunc: [ffi::JSValue; 2] = [ffi::UNDEFINED; 2];
                     let ret = unsafe {
-                        let promise = ffi::JS_NewPromiseCapability(ctxt.as_ptr(), rfunc.as_ptr() as *mut _);
-                        let handle = RJSPromise::new(ctxt, &Value::from(promise), &Value::from(rfunc[0]), &Value::from(rfunc[1]));
+                        let promise =
+                            ffi::JS_NewPromiseCapability(ctxt.as_ptr(), rfunc.as_ptr() as *mut _);
+                        let handle = RJSPromise::new(
+                            ctxt,
+                            &Value::from(promise),
+                            &Value::from(rfunc[0]),
+                            &Value::from(rfunc[1]),
+                        );
                         let rel = msg_tx.as_ref();
                         println!("before send msg");
-                        rel.send(MsgType::FS_READALL(String::from(path), handle)).unwrap();
+                        rel.send(MsgType::FS_READALL(String::from(path), handle))
+                            .unwrap();
                         promise
                     };
                     ret
@@ -342,15 +355,15 @@ globalThis.os = os;
                     //    "hello {}",
                     //    ctxt.to_cstring(&args[0]).unwrap().to_string_lossy()
                     //);
-
                 },
                 Some("sayHello"),
                 1,
             )
             .unwrap();
 
-
-        ctxt.global_object().set_property("sayHello", hello).unwrap();
+        ctxt.global_object()
+            .set_property("sayHello", hello)
+            .unwrap();
         let mut interactive = opt.interactive;
 
         let res = if let Some(expr) = opt.expr {
@@ -399,7 +412,7 @@ globalThis.os = os;
         let (resp_tx, resp_rx) = sync_channel::<RespType>(2);
         let mut job_id = 0;
         let mut job_queue: HashMap<u32, RJSPromise> = HashMap::new();
-        event_rt.block_on(async{
+        event_rt.block_on(async {
             'out: loop {
                 loop {
                     let msg = msg_rx.try_recv();
@@ -408,9 +421,8 @@ globalThis.os = os;
                         Ok(MsgType::FS_READALL(path, promise)) => {
                             job_id += 1;
                             job_queue.insert(job_id, promise);
-                            println!("job ib is {} path is {}", job_id, path);
                             tokio::spawn(test_fs(path, resp_tx.clone(), job_id));
-                        },
+                        }
                         Err(_) => break,
                     }
                 }
@@ -418,25 +430,48 @@ globalThis.os = os;
                 //ctxt.std_loop();
                 loop {
                     match rt.execute_pending_job() {
-                        Ok(None) => { break; },
-                        Ok(Some(_)) => { println!("@@@ Done some Job@@@@"); continue 'out; },
-                        Err(err) => { println!("Error when do job!!!!");}
+                        Ok(None) => {
+                            break;
+                        }
+                        Ok(Some(_)) => {
+                            println!("@@@ Done some Job@@@@");
+                            continue 'out;
+                        }
+                        Err(_err) => {
+                            println!("Error when do job!!!!");
+                            break 'out;
+                        }
                     }
                 }
 
                 let resp = resp_rx.recv();
                 match resp {
-                    Ok(RespType::FS_RESPONSE(job_id, content)) => {
-                        let promise = job_queue.remove(&job_id);
-                        match promise {
-                            Some(promise) => unsafe {
-                                    ffi::JS_Call(promise.ctxt.as_ptr(),
-                                    promise.resolve.raw(),
-                                    ffi::NULL,
-                                    1 as i32,
-                                    std::str::from_utf8(&content).unwrap().into_values(&promise.ctxt).as_ptr() as *mut _);
-                            },
-                            None => {},
+                    Ok(RespType::FS_RESPONSE(job_id, ref content)) => {
+                        if let Some(promise) = job_queue.remove(&job_id) {
+                            let mut resp = None;
+                            let mut resp_err = String::new();
+                            let handle = {
+                                match content {
+                                    Ok(content) => {
+                                        resp = Some(std::str::from_utf8(&content).unwrap());
+                                        &promise.resolve
+                                    }
+                                    Err(err) => {
+                                        resp_err.push_str(&format!("QJS Error {:?}", err));
+                                        &promise.reject
+                                    }
+                                }
+                            };
+
+                            unsafe {
+                                ffi::JS_Call(promise.ctxt.as_ptr(),
+                                         handle.raw(),
+                                         ffi::NULL,
+                                         1 as i32,
+                                         resp.unwrap_or(&resp_err)
+                                         .into_values(&promise.ctxt)
+                                         .as_ptr() as *mut _);
+                            }
                         }
                     },
                     Err(_) => {}
@@ -448,7 +483,6 @@ globalThis.os = os;
                 //std::thread::sleep(std::time::Duration::from_secs(2));
             }
         });
-
     }
     if opt.dump_memory {
         let stats = rt.memory_usage();
