@@ -23,6 +23,8 @@ use qjs::{ffi, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Run
 use std::ptr::NonNull;
 use std::sync::mpsc::{SyncSender, sync_channel};
 
+use std::collections::HashMap;
+
 #[derive(Debug, StructOpt)]
 #[structopt(name = "qjs", about = "QuickJS stand alone interpreter")]
 pub struct Opt {
@@ -206,10 +208,10 @@ enum MsgType<'a> {
 }
 
 enum RespType {
-    FS_RESPONSE(Vec<u8>),
+    FS_RESPONSE(u32, Vec<u8>),
 }
 //use futures::executor::block_on;
-async fn test_fs(path: String, tx: SyncSender<RespType>)
+async fn test_fs(path: String, tx: SyncSender<RespType>, job_id: u32)
 {
     println!("path is {:?}", path);
     let mut file = match File::open(path).await {
@@ -223,7 +225,7 @@ async fn test_fs(path: String, tx: SyncSender<RespType>)
     file.read_to_end(&mut contents).await.unwrap();
     //println!("Contents in rust: {:?}", std::str::from_utf8(&contents));
 
-    tx.send(RespType::FS_RESPONSE(contents)).unwrap();
+    tx.send(RespType::FS_RESPONSE(job_id, contents)).unwrap();
 }
 
 struct RJSPromise<'a> {
@@ -324,11 +326,13 @@ globalThis.os = os;
                     let path = String::from(ctxt.to_cstring(&args[0]).unwrap().to_string_lossy());
                     let msg_tx = ctxt.userdata::<SyncSender<MsgType>>().unwrap();
 
+                    println!("In Rust Function path is {}", path);
                     let rfunc : [ffi::JSValue;2] = [ffi::UNDEFINED;2];
                     let ret = unsafe {
                         let promise = ffi::JS_NewPromiseCapability(ctxt.as_ptr(), rfunc.as_ptr() as *mut _);
                         let handle = RJSPromise::new(ctxt, &Value::from(promise), &Value::from(rfunc[0]), &Value::from(rfunc[1]));
                         let rel = msg_tx.as_ref();
+                        println!("before send msg");
                         rel.send(MsgType::FS_READALL(String::from(path), handle)).unwrap();
                         promise
                     };
@@ -393,18 +397,19 @@ globalThis.os = os;
         }
 
         let (resp_tx, resp_rx) = sync_channel::<RespType>(2);
-        let mut g_promise: Option<RJSPromise> = None;
-
+        let mut job_id = 0;
+        let mut job_queue: HashMap<u32, RJSPromise> = HashMap::new();
         event_rt.block_on(async{
-            loop {
-
+            'out: loop {
                 loop {
                     let msg = msg_rx.try_recv();
 
                     match msg {
                         Ok(MsgType::FS_READALL(path, promise)) => {
-                            g_promise = Some(promise);
-                            tokio::spawn(test_fs(path, resp_tx.clone()));
+                            job_id += 1;
+                            job_queue.insert(job_id, promise);
+                            println!("job ib is {} path is {}", job_id, path);
+                            tokio::spawn(test_fs(path, resp_tx.clone(), job_id));
                         },
                         Err(_) => break,
                     }
@@ -412,15 +417,17 @@ globalThis.os = os;
 
                 //ctxt.std_loop();
                 loop {
-                    if let Ok(None) = rt.execute_pending_job() {
-                        break;
+                    match rt.execute_pending_job() {
+                        Ok(None) => { break; },
+                        Ok(Some(_)) => { println!("@@@ Done some Job@@@@"); continue 'out; },
+                        Err(err) => { println!("Error when do job!!!!");}
                     }
                 }
 
                 let resp = resp_rx.recv();
                 match resp {
-                    Ok(RespType::FS_RESPONSE(content)) => {
-                        let promise = g_promise.take();
+                    Ok(RespType::FS_RESPONSE(job_id, content)) => {
+                        let promise = job_queue.remove(&job_id);
                         match promise {
                             Some(promise) => unsafe {
                                     ffi::JS_Call(promise.ctxt.as_ptr(),
