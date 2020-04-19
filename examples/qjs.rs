@@ -9,12 +9,15 @@ use std::os::raw::{c_char, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::null_mut;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use failure::Error;
 use foreign_types::ForeignTypeRef;
 use foreign_types_shared::ForeignTypeRef as OtherForeignTypeRef;
 use structopt::StructOpt;
+
+use tokio::time::{delay_queue, DelayQueue};
 
 use qjs::{
     ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value,
@@ -23,9 +26,10 @@ use tokio::fs::File;
 use tokio::prelude::*;
 
 use std::ptr::NonNull;
-use std::sync::mpsc::{sync_channel, SyncSender};
-
+//use std::sync::mpsc::{sync_channel, Sender};
 use std::error::Error as StdError;
+use tokio::stream::{self, StreamExt};
+use tokio::sync::mpsc::{channel, Sender};
 
 use std::collections::HashMap;
 
@@ -215,13 +219,13 @@ enum RespType {
     FS_RESPONSE(u32, Result<Vec<u8>, Error>),
 }
 //use futures::executor::block_on;
-async fn test_fs(path: String, tx: SyncSender<RespType>, job_id: u32) {
+async fn test_fs(path: String, mut tx: Sender<RespType>, job_id: u32) {
     println!("path is {:?}", path);
     let mut file = match File::open(path).await {
         Ok(file) => file,
         Err(err) => {
             println!("err is {}", err);
-            tx.send(RespType::FS_RESPONSE(job_id, Err(err.into()))).unwrap();
+            tx.try_send(RespType::FS_RESPONSE(job_id, Err(err.into())));
             return;
         }
     };
@@ -229,7 +233,7 @@ async fn test_fs(path: String, tx: SyncSender<RespType>, job_id: u32) {
     file.read_to_end(&mut contents).await.unwrap();
     //println!("Contents in rust: {:?}", std::str::from_utf8(&contents));
 
-    tx.send(RespType::FS_RESPONSE(job_id, Ok(contents))).unwrap();
+    tx.send(RespType::FS_RESPONSE(job_id, Ok(contents))).await;
 }
 
 struct RJSPromise<'a> {
@@ -256,10 +260,89 @@ impl<'a> RJSPromise<'a> {
     }
 }
 
+struct RuffCtx<'a> {
+    msg_tx: Sender<MsgType<'a>>,
+    timer_queue: Rc<DelayQueue<u32>>,
+}
+
+impl RuffCtx<'static> {
+    pub fn new(msg_tx: Sender<MsgType<'static>>, timer_queue: Rc<DelayQueue<u32>>) -> Self {
+        RuffCtx {
+            msg_tx,
+            timer_queue,
+        }
+    }
+}
+
+fn handle_msg<'a>(
+    msg: Option<MsgType<'a>>,
+    job_id: &mut u32,
+    mut resp_tx: Sender<RespType>,
+    job_queue: &mut HashMap<u32, RJSPromise<'a>>,
+) {
+    match msg {
+        Some(MsgType::FS_READALL(path, promise)) => {
+            *job_id += 1;
+            job_queue.insert(*job_id, promise);
+            tokio::spawn(test_fs(path, resp_tx.clone(), *job_id));
+        }
+        None => {}
+    }
+}
+
+fn handle_response(mut resp: Option<RespType>, job_queue: &mut HashMap<u32, RJSPromise>) {
+    match resp {
+        Some(RespType::FS_RESPONSE(job_id, ref mut content)) => {
+            if let Some(promise) = job_queue.remove(&job_id) {
+                let mut resp = None;
+                let mut resp_err = String::new();
+                let handle = {
+                    match content {
+                        Ok(content) => {
+                            resp = Some(promise.ctxt.new_array_buffer(content));
+                            //resp = Some(std::str::from_utf8(&content).unwrap());
+                            &promise.resolve
+                        }
+                        Err(err) => {
+                            resp_err.push_str(&format!("QJS Error {:?}", err));
+                            &promise.reject
+                        }
+                    }
+                };
+
+                unsafe {
+                    if let Some(resp_to_js) = resp {
+                        ffi::JS_Call(
+                            promise.ctxt.as_ptr(),
+                            handle.raw(),
+                            ffi::NULL,
+                            1 as i32,
+                            resp_to_js.into_values(&promise.ctxt).as_ptr() as *mut _,
+                        );
+                    } else {
+                        ffi::JS_Call(
+                            promise.ctxt.as_ptr(),
+                            handle.raw(),
+                            ffi::NULL,
+                            1 as i32,
+                            resp_err.into_values(&promise.ctxt).as_ptr() as *mut _,
+                        );
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+}
 fn main() -> Result<(), Error> {
     pretty_env_logger::init();
 
-    let (mut msg_tx, msg_rx) = sync_channel::<MsgType>(2);
+    let (mut msg_tx, mut msg_rx) = channel::<MsgType>(2);
+    let mut respmsg_pending_num = 0;
+
+    let mut timer_queue: Rc<DelayQueue<u32>> = Rc::new(DelayQueue::new());
+
+    let mut ruff_ctx = RuffCtx::new(msg_tx, Rc::clone(&timer_queue));
 
     let opt = Opt::from_clap(
         &Opt::clap()
@@ -283,7 +366,7 @@ fn main() -> Result<(), Error> {
     };
     let ctxt = Context::new(&rt);
 
-    ctxt.set_userdata(NonNull::new(&mut msg_tx));
+    ctxt.set_userdata(NonNull::new(&mut ruff_ctx));
 
     // loader for ES6 modules
     rt.set_module_loader::<()>(None, Some(jsc_module_loader), None);
@@ -330,7 +413,7 @@ globalThis.os = os;
             .new_c_function(
                 |ctxt, _this, args| {
                     let path = String::from(ctxt.to_cstring(&args[0]).unwrap().to_string_lossy());
-                    let msg_tx = ctxt.userdata::<SyncSender<MsgType>>().unwrap();
+                    let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
 
                     println!("In Rust Function path is {}", path);
                     let rfunc: [ffi::JSValue; 2] = [ffi::UNDEFINED; 2];
@@ -343,10 +426,11 @@ globalThis.os = os;
                             &Value::from(rfunc[0]),
                             &Value::from(rfunc[1]),
                         );
-                        let rel = msg_tx.as_ref();
-                        println!("before send msg");
-                        rel.send(MsgType::FS_READALL(String::from(path), handle))
-                            .unwrap();
+                        ruff_ctx
+                            .as_mut()
+                            .msg_tx
+                            .try_send(MsgType::FS_READALL(String::from(path), handle));
+                        //.expect("Fail to send msg");
                         promise
                     };
                     ret
@@ -404,83 +488,39 @@ globalThis.os = os;
         }
 
         if interactive {
-            println!("interactive");
             ctxt.eval_binary(&*ffi::REPL, false)?;
             ctxt.std_loop();
         }
 
-        let (resp_tx, resp_rx) = sync_channel::<RespType>(2);
+        let (mut resp_tx, mut resp_rx) = channel::<RespType>(2);
         let mut job_id = 0;
         let mut job_queue: HashMap<u32, RJSPromise> = HashMap::new();
+
         event_rt.block_on(async {
-            'out: loop {
-                loop {
-                    let msg = msg_rx.try_recv();
-
-                    match msg {
-                        Ok(MsgType::FS_READALL(path, promise)) => {
-                            job_id += 1;
-                            job_queue.insert(job_id, promise);
-                            tokio::spawn(test_fs(path, resp_tx.clone(), job_id));
-                        }
-                        Err(_) => break,
-                    }
+            loop {
+                tokio::select! {
+                    msg = msg_rx.recv() => {
+                        handle_msg(msg, &mut job_id, resp_tx.clone(), &mut job_queue);
+                    },
+                    mut resp = resp_rx.recv() => {
+                        handle_response(resp, &mut job_queue);
+                    },
                 }
-
-                //ctxt.std_loop();
                 loop {
                     match rt.execute_pending_job() {
                         Ok(None) => {
                             break;
                         }
                         Ok(Some(_)) => {
-                            println!("@@@ Done some Job@@@@");
-                            continue 'out;
+                            //println!("@@@ Done some Job@@@@");
+                            continue;
                         }
                         Err(_err) => {
                             println!("Error when do job!!!!");
-                            break 'out;
+                            break;
                         }
                     }
                 }
-
-                let resp = resp_rx.recv();
-                match resp {
-                    Ok(RespType::FS_RESPONSE(job_id, ref content)) => {
-                        if let Some(promise) = job_queue.remove(&job_id) {
-                            let mut resp = None;
-                            let mut resp_err = String::new();
-                            let handle = {
-                                match content {
-                                    Ok(content) => {
-                                        resp = Some(std::str::from_utf8(&content).unwrap());
-                                        &promise.resolve
-                                    }
-                                    Err(err) => {
-                                        resp_err.push_str(&format!("QJS Error {:?}", err));
-                                        &promise.reject
-                                    }
-                                }
-                            };
-
-                            unsafe {
-                                ffi::JS_Call(promise.ctxt.as_ptr(),
-                                         handle.raw(),
-                                         ffi::NULL,
-                                         1 as i32,
-                                         resp.unwrap_or(&resp_err)
-                                         .into_values(&promise.ctxt)
-                                         .as_ptr() as *mut _);
-                            }
-                        }
-                    },
-                    Err(_) => {}
-                }
-                //i += 1;
-                //if i >= 5 {
-                //    break;
-                //}
-                //std::thread::sleep(std::time::Duration::from_secs(2));
             }
         });
     }
