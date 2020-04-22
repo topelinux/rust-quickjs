@@ -103,6 +103,7 @@ pub struct RJSTimerHandler<'a> {
     pub ctxt: &'a ContextRef,
     pub callback: Local<'a, Value>,
     pub delay_ms: u64,
+    pub id: u32,
 }
 
 impl<'a> RJSTimerHandler<'a> {
@@ -110,7 +111,8 @@ impl<'a> RJSTimerHandler<'a> {
         Self {
             ctxt,
             delay_ms,
-            callback: ctxt.clone_value(callback)
+            callback: ctxt.clone_value(callback),
+            id: 0
         }
     }
 }
@@ -156,7 +158,7 @@ impl<'a> RRIdManager<'a> {
 
     pub fn handle_msg(
         &mut self,
-        msg: Option<MsgType<'a>>,
+        mut msg: Option<MsgType<'a>>,
         mut resp_tx: Sender<RespType>,
         timer_queue: &mut DelayQueue<RJSTimerHandler<'a>>
     ) -> Option<RRId> {
@@ -167,9 +169,10 @@ impl<'a> RRIdManager<'a> {
                 tokio::spawn(fs_readall_async(path, resp_tx.clone(), id));
                 Some(RRId::Promise(id))
             }
-            Some(MsgType::ADD_TIMER(handle)) => {
+            Some(MsgType::ADD_TIMER(mut handle)) => {
                 let delay_ms: u64 = handle.delay_ms;
                 let id = self.next_id();
+                handle.id = id;
                 let key = timer_queue.insert(handle, Duration::from_millis(delay_ms));
                 self.pending_timer.insert(id, key);
                 Some(RRId::Timer(id))
@@ -221,6 +224,15 @@ impl<'a> RRIdManager<'a> {
             }
             None => {}
         }
+    }
+
+    pub fn timer_is_empty(&self) -> bool {
+        self.pending_timer.is_empty()
+    }
+
+    pub fn handle_timer(&mut self, handle: RJSTimerHandler) {
+        handle.callback.call(None, [0;0]);
+        self.pending_timer.remove(&handle.id);
     }
 }
 

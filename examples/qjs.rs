@@ -176,13 +176,10 @@ fn main() -> Result<(), Error> {
     pretty_env_logger::init();
 
     let (mut msg_tx, mut msg_rx) = channel::<MsgType>(2);
-    let mut respmsg_pending_num = 0;
-
-    let mut timer_queue: DelayQueue<RJSTimerHandler> = DelayQueue::new();
-
     let mut ruff_ctx = RuffCtx::new(msg_tx);
-
+    let mut timer_queue: DelayQueue<RJSTimerHandler> = DelayQueue::new();
     let mut resoure_manager = RRIdManager::new();
+
     let opt = Opt::from_clap(
         &Opt::clap()
             .version(qjs::LONG_VERSION.as_str())
@@ -320,34 +317,29 @@ globalThis.os = os;
                         resoure_manager.handle_response(resp);
                         should_poll_timer = true;
                     },
-                    v = timer_queue.next(), if should_poll_timer => {
+                    v = timer_queue.next(), if !resoure_manager.timer_is_empty() => {
                         match v {
                             Some(v) => {
                                 match v {
                                     Ok(expire) => {
-                                        let timer_handler = expire.get_ref();
-                                        println!("timer triggered{}", timer_handler.delay_ms);
-                                        timer_handler.callback.call(None, [0;0]);
+                                        //let timer_handler = expire.get_ref();
+                                        resoure_manager.handle_timer(expire.into_inner());
+                                        //timer_handler.callback.call(None, [0;0]);
                                     }
 
                                     Err(_) => {}
                                 }
                             }
                             None => {
-                                should_poll_timer = false;
+                                println!("Why come here??");
                             }
                         }
                     },
                 }
                 loop {
                     match rt.execute_pending_job() {
-                        Ok(None) => {
-                            break;
-                        }
-                        Ok(Some(_)) => {
-                            //println!("@@@ Done some Job@@@@");
-                            continue;
-                        }
+                        Ok(None) => break,
+                        Ok(Some(_)) => continue,
                         Err(_err) => {
                             println!("Error when do job!!!!");
                             break;
