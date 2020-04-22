@@ -9,9 +9,9 @@ use std::os::raw::{c_char, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::null_mut;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use std::sync::{Arc, Mutex};
 use failure::Error;
 use foreign_types::ForeignTypeRef;
 use foreign_types_shared::ForeignTypeRef as OtherForeignTypeRef;
@@ -20,7 +20,7 @@ use structopt::StructOpt;
 use tokio::time::{delay_queue, DelayQueue};
 
 use qjs::{
-    ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value,
+    ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value, NewValue
 };
 use tokio::fs::File;
 use tokio::prelude::*;
@@ -213,13 +213,14 @@ fn eval_buf<'a>(
 
 enum MsgType<'a> {
     FS_READALL(String, RJSPromise<'a>),
+    ADD_TIMER(RJSTimerHandler<'a>),
 }
 
 enum RespType {
     FS_RESPONSE(u32, Result<Vec<u8>, Error>),
 }
 //use futures::executor::block_on;
-async fn test_fs(path: String, mut tx: Sender<RespType>, job_id: u32) {
+async fn fs_readall_async(path: String, mut tx: Sender<RespType>, job_id: u32) {
     println!("path is {:?}", path);
     let mut file = match File::open(path).await {
         Ok(file) => file,
@@ -243,12 +244,6 @@ struct RJSPromise<'a> {
     reject: Local<'a, Value>,
 }
 
-impl<'a> Drop for RJSPromise<'a> {
-    fn drop(&mut self) {
-        self.ctxt.free_value(self.resolve.raw());
-        self.ctxt.free_value(self.reject.raw());
-    }
-}
 impl<'a> RJSPromise<'a> {
     pub unsafe fn new(ctxt: &'a ContextRef, p: &Value, resolve: &Value, reject: &Value) -> Self {
         Self {
@@ -260,90 +255,226 @@ impl<'a> RJSPromise<'a> {
     }
 }
 
+impl<'a> Drop for RJSPromise<'a> {
+    fn drop(&mut self) {
+        self.ctxt.free_value(self.resolve.raw());
+        self.ctxt.free_value(self.reject.raw());
+    }
+}
+
+struct RJSTimerHandler<'a> {
+    ctxt: &'a ContextRef,
+    callback: Local<'a, Value>,
+    delay_ms: u64,
+}
+
+impl<'a> RJSTimerHandler<'a> {
+    pub unsafe fn new(ctxt: &'a ContextRef, delay_ms: u64, callback: &Value) -> Self {
+        Self {
+            ctxt,
+            delay_ms,
+            callback: ctxt.clone_value(callback)
+        }
+    }
+}
+
 struct RuffCtx<'a> {
     msg_tx: Sender<MsgType<'a>>,
-    timer_queue: Rc<DelayQueue<u32>>,
 }
 
 impl RuffCtx<'static> {
-    pub fn new(msg_tx: Sender<MsgType<'static>>, timer_queue: Rc<DelayQueue<u32>>) -> Self {
+    pub fn new(msg_tx: Sender<MsgType<'static>>) -> Self {
         RuffCtx {
             msg_tx,
-            timer_queue,
         }
     }
 }
 
-fn handle_msg<'a>(
-    msg: Option<MsgType<'a>>,
-    job_id: &mut u32,
-    mut resp_tx: Sender<RespType>,
-    job_queue: &mut HashMap<u32, RJSPromise<'a>>,
-) {
-    match msg {
-        Some(MsgType::FS_READALL(path, promise)) => {
-            *job_id += 1;
-            job_queue.insert(*job_id, promise);
-            tokio::spawn(test_fs(path, resp_tx.clone(), *job_id));
-        }
-        None => {}
-    }
+#[derive(Debug)]
+enum RRId {
+    Timer(u32),
+    Promise(u32),
 }
 
-fn handle_response(mut resp: Option<RespType>, job_queue: &mut HashMap<u32, RJSPromise>) {
-    match resp {
-        Some(RespType::FS_RESPONSE(job_id, ref mut content)) => {
-            if let Some(promise) = job_queue.remove(&job_id) {
-                let mut resp = None;
-                let mut resp_err = String::new();
-                let handle = {
-                    match content {
-                        Ok(content) => {
-                            resp = Some(promise.ctxt.new_array_buffer(content));
-                            //resp = Some(std::str::from_utf8(&content).unwrap());
-                            &promise.resolve
-                        }
-                        Err(err) => {
-                            resp_err.push_str(&format!("QJS Error {:?}", err));
-                            &promise.reject
-                        }
-                    }
-                };
+struct RRIdManager<'a> {
+    inner_cur_id: u32,
+    pending_job: HashMap<u32, RJSPromise<'a>>,
+    pending_timer: HashMap<u32, delay_queue::Key>
+}
 
-                unsafe {
-                    if let Some(resp_to_js) = resp {
-                        ffi::JS_Call(
-                            promise.ctxt.as_ptr(),
-                            handle.raw(),
-                            ffi::NULL,
-                            1 as i32,
-                            resp_to_js.into_values(&promise.ctxt).as_ptr() as *mut _,
-                        );
-                    } else {
-                        ffi::JS_Call(
-                            promise.ctxt.as_ptr(),
-                            handle.raw(),
-                            ffi::NULL,
-                            1 as i32,
-                            resp_err.into_values(&promise.ctxt).as_ptr() as *mut _,
-                        );
+impl<'a> RRIdManager<'a> {
+    pub fn new() -> Self {
+        Self {
+            inner_cur_id: 0,
+            pending_job: HashMap::new(),
+            pending_timer: HashMap::new()
+        }
+    }
+
+    fn next_id(&mut self) -> u32 {
+        let ret = self.inner_cur_id;
+        self.inner_cur_id += 1;
+        ret
+    }
+
+    //pub fn new_timer_id(&mut self) -> RRId {
+    //    Timer(self.next_id())
+    //}
+
+    //pub fn new_promise_id(&mut self) -> RRId {
+    //    Promise(self.next_id())
+    //}
+
+    pub fn handle_msg(
+        &mut self,
+        msg: Option<MsgType<'a>>,
+        mut resp_tx: Sender<RespType>,
+        timer_queue: &mut DelayQueue<RJSTimerHandler<'a>>
+    ) -> Option<RRId> {
+        match msg {
+            Some(MsgType::FS_READALL(path, promise)) => {
+                let id = self.next_id();
+                self.pending_job.insert(id, promise);
+                tokio::spawn(fs_readall_async(path, resp_tx.clone(), id));
+                Some(RRId::Promise(id))
+            }
+            Some(MsgType::ADD_TIMER(handle)) => {
+                let delay_ms: u64 = handle.delay_ms;
+                let id = self.next_id();
+                let key = timer_queue.insert(handle, Duration::from_millis(delay_ms));
+                self.pending_timer.insert(id, key);
+                Some(RRId::Timer(id))
+            }
+            None => None
+        }
+    }
+
+    pub fn handle_response(&mut self, mut resp: Option<RespType>) {
+        match resp {
+            Some(RespType::FS_RESPONSE(job_id, ref mut content)) => {
+                if let Some(promise) = self.pending_job.remove(&job_id) {
+                    let mut resp = None;
+                    let mut resp_err = String::new();
+                    let handle = {
+                        match content {
+                            Ok(content) => {
+                                resp = Some(promise.ctxt.new_array_buffer(content));
+                                //resp = Some(std::str::from_utf8(&content).unwrap());
+                                &promise.resolve
+                            }
+                            Err(err) => {
+                                resp_err.push_str(&format!("QJS Error {:?}", err));
+                                &promise.reject
+                            }
+                        }
+                    };
+
+                    unsafe {
+                        if let Some(resp_to_js) = resp {
+                            ffi::JS_Call(
+                                promise.ctxt.as_ptr(),
+                                handle.raw(),
+                                ffi::NULL,
+                                1 as i32,
+                                resp_to_js.into_values(&promise.ctxt).as_ptr() as *mut _,
+                            );
+                        } else {
+                            ffi::JS_Call(
+                                promise.ctxt.as_ptr(),
+                                handle.raw(),
+                                ffi::NULL,
+                                1 as i32,
+                                resp_err.into_values(&promise.ctxt).as_ptr() as *mut _,
+                            );
+                        }
                     }
                 }
             }
+            None => {}
         }
-        None => {}
     }
 }
+
+//struct RuffResourceManager<'a> {
+//    job_queue: HashMap<RRId, RJSPromise<'a>>,
+//    timer_queue: DelayQueue<(RRId, RJSTimerHandler<'a>)>,
+//    next_id: RRId,
+//}
+//
+//impl<'a> RuffResourceManager<'a> {
+//    pub fn new() -> Self {
+//        Self {
+//            job_queue: HashMap::new(),
+//            timer_queue: DelayQueue::new(),
+//            next_id: 0
+//        }
+//    }
+//
+//    fn next_rid(&mut self) -> u32 {
+//        let ret = self.next_id;
+//        self.next_id += 1;
+//        ret
+//    }
+//
+//    pub push_prosemise
+//}
+
+fn inner_fs_readall(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> ffi::JSValue {
+    let path = String::from(ctxt.to_cstring(&args[0]).unwrap().to_string_lossy());
+    let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
+
+    println!("In Rust Function path is {}", path);
+    let rfunc: [ffi::JSValue; 2] = [ffi::UNDEFINED; 2];
+    let ret = unsafe {
+        let promise =
+            ffi::JS_NewPromiseCapability(ctxt.as_ptr(), rfunc.as_ptr() as *mut _);
+        let handle = RJSPromise::new(
+            ctxt,
+            &Value::from(promise),
+            &Value::from(rfunc[0]),
+            &Value::from(rfunc[1]),
+        );
+        ruff_ctx
+            .as_mut()
+            .msg_tx
+            .try_send(MsgType::FS_READALL(String::from(path), handle));
+        //.expect("Fail to send msg");
+        promise
+    };
+    ret
+}
+
+fn inner_setTimeout(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> ffi::JSValue {
+    let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
+    if ctxt.is_function(&args[0]) {
+        let delay_ms = ctxt.to_int64(&args[1]).unwrap() as u64;
+        unsafe {
+            let handle = RJSTimerHandler::new(
+                ctxt,
+                delay_ms,
+                &Value::from((&args[0]).new_value(&ctxt))
+            );
+            println!("timeout is {}", delay_ms);
+            ruff_ctx
+                .as_mut()
+                .msg_tx
+                .try_send(MsgType::ADD_TIMER(handle));
+        }
+    }
+    ffi::UNDEFINED
+}
+
 fn main() -> Result<(), Error> {
     pretty_env_logger::init();
 
     let (mut msg_tx, mut msg_rx) = channel::<MsgType>(2);
     let mut respmsg_pending_num = 0;
 
-    let mut timer_queue: Rc<DelayQueue<u32>> = Rc::new(DelayQueue::new());
+    let mut timer_queue: DelayQueue<RJSTimerHandler> = DelayQueue::new();
 
-    let mut ruff_ctx = RuffCtx::new(msg_tx, Rc::clone(&timer_queue));
+    let mut ruff_ctx = RuffCtx::new(msg_tx);
 
+    let mut resoure_manager = RRIdManager::new();
     let opt = Opt::from_clap(
         &Opt::clap()
             .version(qjs::LONG_VERSION.as_str())
@@ -406,48 +537,22 @@ globalThis.os = os;
 
         let mut event_rt = tokio::runtime::Builder::new()
             .threaded_scheduler()
+            .enable_all()
             .build()
             .unwrap();
 
-        let hello = ctxt
-            .new_c_function(
-                |ctxt, _this, args| {
-                    let path = String::from(ctxt.to_cstring(&args[0]).unwrap().to_string_lossy());
-                    let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
+        let fs_readall = ctxt.new_c_function(inner_fs_readall, Some("fs_readall"), 1).unwrap();
+        let os_setTimeout = ctxt.new_c_function(inner_setTimeout, Some("os_setTimeout"), 2).unwrap();
 
-                    println!("In Rust Function path is {}", path);
-                    let rfunc: [ffi::JSValue; 2] = [ffi::UNDEFINED; 2];
-                    let ret = unsafe {
-                        let promise =
-                            ffi::JS_NewPromiseCapability(ctxt.as_ptr(), rfunc.as_ptr() as *mut _);
-                        let handle = RJSPromise::new(
-                            ctxt,
-                            &Value::from(promise),
-                            &Value::from(rfunc[0]),
-                            &Value::from(rfunc[1]),
-                        );
-                        ruff_ctx
-                            .as_mut()
-                            .msg_tx
-                            .try_send(MsgType::FS_READALL(String::from(path), handle));
-                        //.expect("Fail to send msg");
-                        promise
-                    };
-                    ret
-                    //println!("refcount is {:?}", Value::from(rfunc[0]).ref_cnt());
-                    //format!(
-                    //    "hello {}",
-                    //    ctxt.to_cstring(&args[0]).unwrap().to_string_lossy()
-                    //);
-                },
-                Some("sayHello"),
-                1,
-            )
+        ctxt.global_object()
+            .set_property("fs_readall", fs_readall)
             .unwrap();
 
         ctxt.global_object()
-            .set_property("sayHello", hello)
+            .set_property("os_setTimeout", os_setTimeout)
             .unwrap();
+
+
         let mut interactive = opt.interactive;
 
         let res = if let Some(expr) = opt.expr {
@@ -493,17 +598,40 @@ globalThis.os = os;
         }
 
         let (mut resp_tx, mut resp_rx) = channel::<RespType>(2);
-        let mut job_id = 0;
-        let mut job_queue: HashMap<u32, RJSPromise> = HashMap::new();
+        //let mut job_id = 0;
+        //let mut job_queue: HashMap<u32, RJSPromise> = HashMap::new();
 
+        let mut should_poll_timer = true;
         event_rt.block_on(async {
             loop {
                 tokio::select! {
                     msg = msg_rx.recv() => {
-                        handle_msg(msg, &mut job_id, resp_tx.clone(), &mut job_queue);
+                        let ret = resoure_manager.handle_msg(msg, resp_tx.clone(), &mut timer_queue);
+                        should_poll_timer = true;
+                        println!("msg handle ret is {:?}", ret);
                     },
                     mut resp = resp_rx.recv() => {
-                        handle_response(resp, &mut job_queue);
+                        resoure_manager.handle_response(resp);
+                        should_poll_timer = true;
+                    },
+                    v = timer_queue.next(), if should_poll_timer => {
+                        match v {
+                            Some(v) => {
+                                match v {
+                                    Ok(expire) => {
+                                        let timer_handler = expire.get_ref();
+                                        println!("timer triggered{}", timer_handler.delay_ms);
+                                        timer_handler.callback.call(None, [0;0]);
+                                    }
+
+                                    Err(_) => {}
+                                }
+                            }
+                            None => {
+                                println!("Why none");
+                                should_poll_timer = false;
+                            }
+                        }
                     },
                 }
                 loop {
