@@ -94,6 +94,7 @@ mod runtime;
 mod stdlib;
 mod userdata;
 mod value;
+mod utils;
 
 pub use arraybuf::{ArrayBuffer, SharedArrayBuffer};
 pub use atom::{Atom, NewAtom};
@@ -117,6 +118,7 @@ pub use value::{
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub use utils::*;
 
 lazy_static! {
     pub static ref LONG_VERSION: String = format!(

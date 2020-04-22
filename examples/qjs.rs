@@ -3,35 +3,27 @@ extern crate log;
 #[macro_use]
 extern crate cfg_if;
 
+use failure::Error;
+use foreign_types::ForeignTypeRef;
+use foreign_types_shared::ForeignTypeRef as OtherForeignTypeRef;
+use std::error::Error as StdError;
 use std::ffi::{CStr, OsStr};
 use std::mem;
 use std::os::raw::{c_char, c_void};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::ptr::NonNull;
 use std::ptr::null_mut;
 use std::time::{Duration, Instant};
-
-use std::sync::{Arc, Mutex};
-use failure::Error;
-use foreign_types::ForeignTypeRef;
-use foreign_types_shared::ForeignTypeRef as OtherForeignTypeRef;
 use structopt::StructOpt;
-
+use tokio::fs::File;
+use tokio::prelude::*;
+use tokio::stream::{self, StreamExt};
+use tokio::sync::mpsc::{channel, Sender};
 use tokio::time::{delay_queue, DelayQueue};
 
 use qjs::{
-    ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value, NewValue
+    ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value, NewValue, jsc_module_loader, eval_buf, MsgType, RespType, fs_readall_async, RJSPromise, RJSTimerHandler, RuffCtx, RRId, RRIdManager, inner_fs_readall, inner_setTimeout,
 };
-use tokio::fs::File;
-use tokio::prelude::*;
-
-use std::ptr::NonNull;
-//use std::sync::mpsc::{sync_channel, Sender};
-use std::error::Error as StdError;
-use tokio::stream::{self, StreamExt};
-use tokio::sync::mpsc::{channel, Sender};
-
-use std::collections::HashMap;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "qjs", about = "QuickJS stand alone interpreter")]
@@ -179,290 +171,6 @@ cfg_if! {
     }
 }
 
-unsafe extern "C" fn jsc_module_loader(
-    ctx: *mut ffi::JSContext,
-    module_name: *const c_char,
-    _opaque: *mut c_void,
-) -> *mut ffi::JSModuleDef {
-    let ctxt = ContextRef::from_ptr(ctx);
-    let module_name = Path::new(OsStr::from_bytes(CStr::from_ptr(module_name).to_bytes()));
-
-    debug!("load module: {:?}", module_name);
-
-    ctxt.eval_file(module_name, Eval::MODULE | Eval::COMPILE_ONLY)
-        .ok()
-        .map_or_else(null_mut, |func| func.as_ptr().as_ptr())
-}
-
-fn eval_buf<'a>(
-    ctxt: &'a ContextRef,
-    buf: &str,
-    filename: &str,
-    flags: Eval,
-) -> Result<Local<'a, Value>, Error> {
-    if flags.contains(Eval::MODULE) {
-        let val = ctxt.eval_script(buf, filename, flags | Eval::COMPILE_ONLY)?;
-
-        let _ = ctxt.set_import_meta(&val, true, true);
-
-        ctxt.eval_function(val)
-    } else {
-        ctxt.eval_script(buf, filename, flags)
-    }
-}
-
-enum MsgType<'a> {
-    FS_READALL(String, RJSPromise<'a>),
-    ADD_TIMER(RJSTimerHandler<'a>),
-}
-
-enum RespType {
-    FS_RESPONSE(u32, Result<Vec<u8>, Error>),
-}
-//use futures::executor::block_on;
-async fn fs_readall_async(path: String, mut tx: Sender<RespType>, job_id: u32) {
-    println!("path is {:?}", path);
-    let mut file = match File::open(path).await {
-        Ok(file) => file,
-        Err(err) => {
-            println!("err is {}", err);
-            tx.try_send(RespType::FS_RESPONSE(job_id, Err(err.into())));
-            return;
-        }
-    };
-    let mut contents = vec![];
-    file.read_to_end(&mut contents).await.unwrap();
-    //println!("Contents in rust: {:?}", std::str::from_utf8(&contents));
-
-    tx.send(RespType::FS_RESPONSE(job_id, Ok(contents))).await;
-}
-
-struct RJSPromise<'a> {
-    ctxt: &'a ContextRef,
-    p: Local<'a, Value>,
-    resolve: Local<'a, Value>,
-    reject: Local<'a, Value>,
-}
-
-impl<'a> RJSPromise<'a> {
-    pub unsafe fn new(ctxt: &'a ContextRef, p: &Value, resolve: &Value, reject: &Value) -> Self {
-        Self {
-            ctxt,
-            p: ctxt.clone_value(p),
-            resolve: ctxt.clone_value(resolve),
-            reject: ctxt.clone_value(reject),
-        }
-    }
-}
-
-impl<'a> Drop for RJSPromise<'a> {
-    fn drop(&mut self) {
-        self.ctxt.free_value(self.resolve.raw());
-        self.ctxt.free_value(self.reject.raw());
-    }
-}
-
-struct RJSTimerHandler<'a> {
-    ctxt: &'a ContextRef,
-    callback: Local<'a, Value>,
-    delay_ms: u64,
-}
-
-impl<'a> RJSTimerHandler<'a> {
-    pub unsafe fn new(ctxt: &'a ContextRef, delay_ms: u64, callback: &Value) -> Self {
-        Self {
-            ctxt,
-            delay_ms,
-            callback: ctxt.clone_value(callback)
-        }
-    }
-}
-
-struct RuffCtx<'a> {
-    msg_tx: Sender<MsgType<'a>>,
-}
-
-impl RuffCtx<'static> {
-    pub fn new(msg_tx: Sender<MsgType<'static>>) -> Self {
-        RuffCtx {
-            msg_tx,
-        }
-    }
-}
-
-#[derive(Debug)]
-enum RRId {
-    Timer(u32),
-    Promise(u32),
-}
-
-struct RRIdManager<'a> {
-    inner_cur_id: u32,
-    pending_job: HashMap<u32, RJSPromise<'a>>,
-    pending_timer: HashMap<u32, delay_queue::Key>
-}
-
-impl<'a> RRIdManager<'a> {
-    pub fn new() -> Self {
-        Self {
-            inner_cur_id: 0,
-            pending_job: HashMap::new(),
-            pending_timer: HashMap::new()
-        }
-    }
-
-    fn next_id(&mut self) -> u32 {
-        let ret = self.inner_cur_id;
-        self.inner_cur_id += 1;
-        ret
-    }
-
-    //pub fn new_timer_id(&mut self) -> RRId {
-    //    Timer(self.next_id())
-    //}
-
-    //pub fn new_promise_id(&mut self) -> RRId {
-    //    Promise(self.next_id())
-    //}
-
-    pub fn handle_msg(
-        &mut self,
-        msg: Option<MsgType<'a>>,
-        mut resp_tx: Sender<RespType>,
-        timer_queue: &mut DelayQueue<RJSTimerHandler<'a>>
-    ) -> Option<RRId> {
-        match msg {
-            Some(MsgType::FS_READALL(path, promise)) => {
-                let id = self.next_id();
-                self.pending_job.insert(id, promise);
-                tokio::spawn(fs_readall_async(path, resp_tx.clone(), id));
-                Some(RRId::Promise(id))
-            }
-            Some(MsgType::ADD_TIMER(handle)) => {
-                let delay_ms: u64 = handle.delay_ms;
-                let id = self.next_id();
-                let key = timer_queue.insert(handle, Duration::from_millis(delay_ms));
-                self.pending_timer.insert(id, key);
-                Some(RRId::Timer(id))
-            }
-            None => None
-        }
-    }
-
-    pub fn handle_response(&mut self, mut resp: Option<RespType>) {
-        match resp {
-            Some(RespType::FS_RESPONSE(job_id, ref mut content)) => {
-                if let Some(promise) = self.pending_job.remove(&job_id) {
-                    let mut resp = None;
-                    let mut resp_err = String::new();
-                    let handle = {
-                        match content {
-                            Ok(content) => {
-                                resp = Some(promise.ctxt.new_array_buffer(content));
-                                //resp = Some(std::str::from_utf8(&content).unwrap());
-                                &promise.resolve
-                            }
-                            Err(err) => {
-                                resp_err.push_str(&format!("QJS Error {:?}", err));
-                                &promise.reject
-                            }
-                        }
-                    };
-
-                    unsafe {
-                        if let Some(resp_to_js) = resp {
-                            ffi::JS_Call(
-                                promise.ctxt.as_ptr(),
-                                handle.raw(),
-                                ffi::NULL,
-                                1 as i32,
-                                resp_to_js.into_values(&promise.ctxt).as_ptr() as *mut _,
-                            );
-                        } else {
-                            ffi::JS_Call(
-                                promise.ctxt.as_ptr(),
-                                handle.raw(),
-                                ffi::NULL,
-                                1 as i32,
-                                resp_err.into_values(&promise.ctxt).as_ptr() as *mut _,
-                            );
-                        }
-                    }
-                }
-            }
-            None => {}
-        }
-    }
-}
-
-//struct RuffResourceManager<'a> {
-//    job_queue: HashMap<RRId, RJSPromise<'a>>,
-//    timer_queue: DelayQueue<(RRId, RJSTimerHandler<'a>)>,
-//    next_id: RRId,
-//}
-//
-//impl<'a> RuffResourceManager<'a> {
-//    pub fn new() -> Self {
-//        Self {
-//            job_queue: HashMap::new(),
-//            timer_queue: DelayQueue::new(),
-//            next_id: 0
-//        }
-//    }
-//
-//    fn next_rid(&mut self) -> u32 {
-//        let ret = self.next_id;
-//        self.next_id += 1;
-//        ret
-//    }
-//
-//    pub push_prosemise
-//}
-
-fn inner_fs_readall(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> ffi::JSValue {
-    let path = String::from(ctxt.to_cstring(&args[0]).unwrap().to_string_lossy());
-    let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
-
-    println!("In Rust Function path is {}", path);
-    let rfunc: [ffi::JSValue; 2] = [ffi::UNDEFINED; 2];
-    let ret = unsafe {
-        let promise =
-            ffi::JS_NewPromiseCapability(ctxt.as_ptr(), rfunc.as_ptr() as *mut _);
-        let handle = RJSPromise::new(
-            ctxt,
-            &Value::from(promise),
-            &Value::from(rfunc[0]),
-            &Value::from(rfunc[1]),
-        );
-        ruff_ctx
-            .as_mut()
-            .msg_tx
-            .try_send(MsgType::FS_READALL(String::from(path), handle));
-        //.expect("Fail to send msg");
-        promise
-    };
-    ret
-}
-
-fn inner_setTimeout(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> ffi::JSValue {
-    let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
-    if ctxt.is_function(&args[0]) {
-        let delay_ms = ctxt.to_int64(&args[1]).unwrap() as u64;
-        unsafe {
-            let handle = RJSTimerHandler::new(
-                ctxt,
-                delay_ms,
-                &Value::from((&args[0]).new_value(&ctxt))
-            );
-            println!("timeout is {}", delay_ms);
-            ruff_ctx
-                .as_mut()
-                .msg_tx
-                .try_send(MsgType::ADD_TIMER(handle));
-        }
-    }
-    ffi::UNDEFINED
-}
 
 fn main() -> Result<(), Error> {
     pretty_env_logger::init();
@@ -598,10 +306,8 @@ globalThis.os = os;
         }
 
         let (mut resp_tx, mut resp_rx) = channel::<RespType>(2);
-        //let mut job_id = 0;
-        //let mut job_queue: HashMap<u32, RJSPromise> = HashMap::new();
-
         let mut should_poll_timer = true;
+
         event_rt.block_on(async {
             loop {
                 tokio::select! {
@@ -628,7 +334,6 @@ globalThis.os = os;
                                 }
                             }
                             None => {
-                                println!("Why none");
                                 should_poll_timer = false;
                             }
                         }

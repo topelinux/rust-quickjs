@@ -34,7 +34,6 @@ proc-macro-hack = "0.5"
 qjs-sys = { version = "0.1", path = "qjs-sys" }
 qjs-derive = { version = "0.1", path = "qjs-derive" }
 foreign-types-shared = "0.3.0"
-calloop = "0.5.1"
 tokio = {version = "0.2.15", features = ["full"] }
 futures = "0.3.4"
 
