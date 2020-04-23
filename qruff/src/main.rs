@@ -22,7 +22,9 @@ use tokio::sync::mpsc::{channel, Sender};
 use tokio::time::{delay_queue, DelayQueue};
 
 use qjs::{
-    ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value, NewValue, jsc_module_loader, eval_buf, MsgType, RespType, fs_readall_async, RJSPromise, RJSTimerHandler, RuffCtx, RRId, RRIdManager, inner_fs_readall, inner_setTimeout,
+    ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime,
+    Value, NewValue, jsc_module_loader, eval_buf, MsgType, RespType, fs_readall_async, RJSPromise,
+    RJSTimerHandler, RuffCtx, RRId, RRIdManager, inner_fs_readall, inner_setTimeout, Unbindable,
 };
 
 #[derive(Debug, StructOpt)]
@@ -241,13 +243,14 @@ globalThis.os = os;
         let fs_readall = ctxt.new_c_function(inner_fs_readall, Some("fs_readall"), 1).unwrap();
         let os_setTimeout = ctxt.new_c_function(inner_setTimeout, Some("os_setTimeout"), 2).unwrap();
 
-        ctxt.global_object()
-            .set_property("fs_readall", fs_readall)
-            .unwrap();
+        let value = ctxt.new_object();
+        let ru = ctxt.bind(&value);
+        Value::unbind(&ctxt, value);
 
-        ctxt.global_object()
-            .set_property("os_setTimeout", os_setTimeout)
-            .unwrap();
+        ru.set_property("fs_readall", fs_readall).unwrap();
+        ru.set_property("setTimeout", os_setTimeout).unwrap();
+
+        ctxt.global_object().set_property("ru", ru).unwrap();
 
 
         let mut interactive = opt.interactive;
@@ -301,7 +304,6 @@ globalThis.os = os;
                 tokio::select! {
                     msg = msg_rx.recv() => {
                         let ret = resoure_manager.handle_msg(msg, resp_tx.clone(), &mut timer_queue);
-                        println!("msg handle ret is {:?}", ret);
                     },
                     mut resp = resp_rx.recv() => {
                         resoure_manager.handle_response(resp);

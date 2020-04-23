@@ -291,7 +291,6 @@ pub fn inner_setTimeout(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]
                 delay_ms,
                 &Value::from((&args[0]).new_value(&ctxt))
             );
-            println!("timeout is {}", delay_ms);
             ruff_ctx
                 .as_mut()
                 .msg_tx

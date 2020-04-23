@@ -15,7 +15,7 @@ function test_timer()
 
 //test_timer();
 
-os_setTimeout(()=> {
+ru.setTimeout(()=> {
     console.log('hi i am trigger');
 }, 1000);
 
