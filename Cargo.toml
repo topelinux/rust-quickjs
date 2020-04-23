@@ -48,4 +48,4 @@ cfile = "0.5"
 libc = "0.2"
 
 [workspace]
-members = ["qjs-sys", "qjs-derive", "qjs-derive-support"]
+members = ["qjs-sys", "qjs-derive", "qjs-derive-support", "qruff"]
