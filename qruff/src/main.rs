@@ -175,7 +175,7 @@ cfg_if! {
 fn main() -> Result<(), Error> {
     pretty_env_logger::init();
 
-    let (mut msg_tx, mut msg_rx) = channel::<MsgType>(2);
+    let (mut msg_tx, mut msg_rx) = channel::<MsgType>(256);
     let mut ruff_ctx = RuffCtx::new(msg_tx);
     let mut timer_queue: DelayQueue<RJSTimerHandler> = DelayQueue::new();
     let mut resoure_manager = RRIdManager::new();
@@ -295,28 +295,23 @@ globalThis.os = os;
         }
 
         let (mut resp_tx, mut resp_rx) = channel::<RespType>(2);
-        let mut should_poll_timer = true;
 
         event_rt.block_on(async {
             loop {
                 tokio::select! {
                     msg = msg_rx.recv() => {
                         let ret = resoure_manager.handle_msg(msg, resp_tx.clone(), &mut timer_queue);
-                        should_poll_timer = true;
                         println!("msg handle ret is {:?}", ret);
                     },
                     mut resp = resp_rx.recv() => {
                         resoure_manager.handle_response(resp);
-                        should_poll_timer = true;
                     },
                     v = timer_queue.next(), if !resoure_manager.timer_is_empty() => {
                         match v {
                             Some(v) => {
                                 match v {
                                     Ok(expire) => {
-                                        //let timer_handler = expire.get_ref();
                                         resoure_manager.handle_timer(expire.into_inner());
-                                        //timer_handler.callback.call(None, [0;0]);
                                     }
 
                                     Err(_) => {}
@@ -337,6 +332,9 @@ globalThis.os = os;
                             break;
                         }
                     }
+                }
+                if resoure_manager.is_empty() {
+                    break;
                 }
             }
         });

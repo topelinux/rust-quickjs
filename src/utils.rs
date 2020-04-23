@@ -13,7 +13,7 @@ use tokio::prelude::*;
 use tokio::sync::mpsc::{channel, Sender};
 use tokio::time::{delay_queue, DelayQueue};
 use crate::{
-    ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value, NewValue
+    ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime, Value, NewValue, Unbindable
 };
 
 pub unsafe extern "C" fn jsc_module_loader(
@@ -53,6 +53,7 @@ pub enum MsgType<'a> {
     ADD_TIMER(RJSTimerHandler<'a>),
 }
 
+#[derive(Debug)]
 pub enum RespType {
     FS_RESPONSE(u32, Result<Vec<u8>, Error>),
 }
@@ -105,6 +106,13 @@ pub struct RJSTimerHandler<'a> {
     pub delay_ms: u64,
     pub id: u32,
 }
+
+impl<'a> Drop for RJSTimerHandler<'a> {
+    fn drop(&mut self) {
+        self.ctxt.free_value(self.callback.raw());
+    }
+}
+
 
 impl<'a> RJSTimerHandler<'a> {
     pub unsafe fn new(ctxt: &'a ContextRef, delay_ms: u64, callback: &Value) -> Self {
@@ -191,7 +199,6 @@ impl<'a> RRIdManager<'a> {
                         match content {
                             Ok(content) => {
                                 resp = Some(promise.ctxt.new_array_buffer(content));
-                                //resp = Some(std::str::from_utf8(&content).unwrap());
                                 &promise.resolve
                             }
                             Err(err) => {
@@ -203,13 +210,17 @@ impl<'a> RRIdManager<'a> {
 
                     unsafe {
                         if let Some(resp_to_js) = resp {
+                            let args =  resp_to_js.into_values(&promise.ctxt);
+                            //println!("array buffer ref count is {:?}", Value::from(args[0]).ref_cnt());
                             ffi::JS_Call(
                                 promise.ctxt.as_ptr(),
                                 handle.raw(),
                                 ffi::NULL,
                                 1 as i32,
-                                resp_to_js.into_values(&promise.ctxt).as_ptr() as *mut _,
+                                args.as_ptr() as *mut _,
                             );
+                            // do free for Value
+                            promise.ctxt.free_value(args[0]);
                         } else {
                             ffi::JS_Call(
                                 promise.ctxt.as_ptr(),
@@ -234,6 +245,14 @@ impl<'a> RRIdManager<'a> {
         handle.callback.call(None, [0;0]);
         self.pending_timer.remove(&handle.id);
     }
+
+    pub fn is_empty(&self) -> bool {
+        if self.pending_timer.is_empty() {
+            self.pending_job.is_empty()
+        } else {
+            false
+        }
+    }
 }
 
 pub fn inner_fs_readall(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> ffi::JSValue {
@@ -251,6 +270,7 @@ pub fn inner_fs_readall(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]
             &Value::from(rfunc[0]),
             &Value::from(rfunc[1]),
         );
+
         ruff_ctx
             .as_mut()
             .msg_tx
