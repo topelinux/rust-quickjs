@@ -250,10 +250,11 @@ globalThis.os = os;
         let fs_readall = ctxt.new_c_function(fs_readall, Some("fs_readall"), 1).unwrap();
         let os_setTimeout = ctxt.new_c_function(setTimeout, Some("os_setTimeout"), 2).unwrap();
 
-        let value = ctxt.new_object();
-        let ru = ctxt.bind(&value);
-        Value::unbind(&ctxt, value);
+        //let value = ctxt.new_object();
+        //let ru = ctxt.bind(&value);
+        //Value::unbind(&ctxt, value);
 
+        let ru = ctxt.to_local(ctxt.new_object());
         ru.set_property("fs_readall", fs_readall).unwrap();
         ru.set_property("setTimeout", os_setTimeout).unwrap();
 
