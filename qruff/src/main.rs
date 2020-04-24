@@ -25,7 +25,7 @@ use tokio::time::{delay_queue, DelayQueue};
 mod utils;
 
 use utils::{
-    RJSTimerHandler, RuffCtx, RRId, RRIdManager, inner_fs_readall, inner_setTimeout,
+    RJSTimerHandler, RuffCtx, RRId, RRIdManager, fs_readall, setTimeout,
     jsc_module_loader, eval_buf, MsgType, RespType, fs_readall_async, RJSPromise,
 };
 
@@ -247,8 +247,8 @@ globalThis.os = os;
             .build()
             .unwrap();
 
-        let fs_readall = ctxt.new_c_function(inner_fs_readall, Some("fs_readall"), 1).unwrap();
-        let os_setTimeout = ctxt.new_c_function(inner_setTimeout, Some("os_setTimeout"), 2).unwrap();
+        let fs_readall = ctxt.new_c_function(fs_readall, Some("fs_readall"), 1).unwrap();
+        let os_setTimeout = ctxt.new_c_function(setTimeout, Some("os_setTimeout"), 2).unwrap();
 
         let value = ctxt.new_object();
         let ru = ctxt.bind(&value);

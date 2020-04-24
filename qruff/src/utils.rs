@@ -255,7 +255,7 @@ impl<'a> RRIdManager<'a> {
     }
 }
 
-pub fn inner_fs_readall(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> ffi::JSValue {
+pub fn fs_readall(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> ffi::JSValue {
     let path = String::from(ctxt.to_cstring(&args[0]).unwrap().to_string_lossy());
     let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
 
@@ -281,7 +281,7 @@ pub fn inner_fs_readall(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]
     ret
 }
 
-pub fn inner_setTimeout(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> ffi::JSValue {
+pub fn setTimeout(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> ffi::JSValue {
     let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
     if ctxt.is_function(&args[0]) {
         let delay_ms = ctxt.to_int64(&args[1]).unwrap() as u64;
