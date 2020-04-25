@@ -3,7 +3,6 @@ extern crate log;
 #[macro_use]
 extern crate cfg_if;
 
-#[macro_use] extern crate const_cstr;
 #[macro_use] extern crate cstr;
 
 #[macro_use]
