@@ -3,6 +3,12 @@ extern crate log;
 #[macro_use]
 extern crate cfg_if;
 
+#[macro_use] extern crate const_cstr;
+#[macro_use] extern crate cstr;
+
+#[macro_use]
+extern crate lazy_static;
+
 use failure::Error;
 use foreign_types::ForeignTypeRef;
 use foreign_types_shared::ForeignTypeRef as OtherForeignTypeRef;
@@ -22,6 +28,7 @@ use tokio::sync::mpsc::{channel, Sender};
 use tokio::time::{delay_queue, DelayQueue};
 
 
+mod qruff_module;
 mod utils;
 
 use utils::{
@@ -29,9 +36,11 @@ use utils::{
     jsc_module_loader, eval_buf, MsgType, RespType, fs_readall_async, RJSPromise,
 };
 
+use qruff_module::{register_timer_class,js_init_module_qruff};
+
 use qjs::{
     ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime,
-    Value, NewValue,Unbindable
+    Value, NewValue,Unbindable, ClassId, Prop
 };
 
 #[derive(Debug, StructOpt)]
@@ -213,6 +222,8 @@ fn main() -> Result<(), Error> {
 
     ctxt.set_userdata(NonNull::new(&mut ruff_ctx));
 
+    register_timer_class(&rt);
+    js_init_module_qruff(&ctxt, "QRuffTimer");
     // loader for ES6 modules
     rt.set_module_loader::<()>(None, Some(jsc_module_loader), None);
 

@@ -2002,6 +2002,10 @@ pub struct JSCFunctionListEntry {
     pub magic: i16,
     pub u: JSCFunctionListEntry__bindgen_ty_1,
 }
+
+unsafe impl Send for *const JSCFunctionListEntry {}
+unsafe impl Sync for *const JSCFunctionListEntry {}
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union JSCFunctionListEntry__bindgen_ty_1 {
