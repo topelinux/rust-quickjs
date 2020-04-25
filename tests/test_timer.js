@@ -20,4 +20,6 @@ ru.setTimeout(()=> {
     console.log('hi i am trigger');
 }, 1000);
 
-console.log(QRuffTimer.QRuffTimer);
+console.log(Object.keys(QRuffTimer));
+console.log(QRuffTimer.CONST_16);
+QRuffTimer.test_func();

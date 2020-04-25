@@ -39,7 +39,7 @@ use qruff_module::{register_timer_class,js_init_module_qruff};
 
 use qjs::{
     ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime,
-    Value, NewValue,Unbindable, ClassId, Prop
+    Value, NewValue,Unbindable, ClassId, Prop, UnsafeCFunction
 };
 
 #[derive(Debug, StructOpt)]
