@@ -21,8 +21,6 @@ unsafe extern "C" fn qruff_setTimeout(
     argc: ::std::os::raw::c_int,
     argv: *mut ffi::JSValue,
 ) -> ffi::JSValue {
-    println!("I am in qruff_test argc is {}", argc);
-
     let ctxt = ContextRef::from_ptr(ctx);
     let this = Value::from(this_val);
     let this = this.check_undefined();
@@ -37,9 +35,9 @@ unsafe extern "C" fn qruff_setTimeout(
             let handle = RJSTimerHandler::new(
                 ctxt,
                 delay_ms,
-                &Value::from((&arg0).new_value(&ctxt))
+                &arg0
+                //Value::from((&arg0).new_value(&ctxt))
             );
-            println!("Before add timer");
             ruff_ctx
                 .as_mut()
                 .msg_tx

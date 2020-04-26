@@ -107,11 +107,11 @@ pub struct RJSTimerHandler<'a> {
     pub id: u32,
 }
 
-impl<'a> Drop for RJSTimerHandler<'a> {
-    fn drop(&mut self) {
-        self.ctxt.free_value(self.callback.raw());
-    }
-}
+//impl<'a> Drop for RJSTimerHandler<'a> {
+    //fn drop(&mut self) {
+    //    self.ctxt.free_value(self.callback.raw());
+    //}
+//}
 
 
 impl<'a> RJSTimerHandler<'a> {
@@ -289,7 +289,7 @@ pub fn setTimeout(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> f
             let handle = RJSTimerHandler::new(
                 ctxt,
                 delay_ms,
-                &Value::from((&args[0]).new_value(&ctxt))
+                &args[0],
             );
             ruff_ctx
                 .as_mut()
