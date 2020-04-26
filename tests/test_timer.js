@@ -1,6 +1,6 @@
 import * as std from "std";
 import * as os from "os";
-import * as QRuffTimer from "QRuffTimer";
+import * as qruff from "qruff";
 
 function test_timer()
 {
@@ -16,10 +16,15 @@ function test_timer()
 
 //test_timer();
 
-ru.setTimeout(()=> {
-    console.log('hi i am trigger');
-}, 1000);
+//ru.setTimeout(()=> {
+//    console.log('hi i am trigger');
+//}, 1000);
+//
+let setTimeout = qruff.setTimeout;
+console.log(Object.keys(qruff));
+console.log(qruff.CONST_16);
 
-console.log(Object.keys(QRuffTimer));
-console.log(QRuffTimer.CONST_16);
-QRuffTimer.test_func();
+
+setTimeout(() => {
+    console.log('Coll Qruff timer be triggerd');
+}, 2000);

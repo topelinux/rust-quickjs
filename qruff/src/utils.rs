@@ -126,7 +126,7 @@ impl<'a> RJSTimerHandler<'a> {
 }
 
 pub struct RuffCtx<'a> {
-    msg_tx: Sender<MsgType<'a>>,
+    pub msg_tx: Sender<MsgType<'a>>,
 }
 
 impl RuffCtx<'static> {

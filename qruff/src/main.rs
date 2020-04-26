@@ -222,7 +222,7 @@ fn main() -> Result<(), Error> {
     ctxt.set_userdata(NonNull::new(&mut ruff_ctx));
 
     register_timer_class(&rt);
-    js_init_module_qruff(&ctxt, "QRuffTimer");
+    js_init_module_qruff(&ctxt, "qruff");
     // loader for ES6 modules
     rt.set_module_loader::<()>(None, Some(jsc_module_loader), None);
 

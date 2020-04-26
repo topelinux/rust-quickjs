@@ -3,8 +3,9 @@ use std::ops::Deref;
 use std::os::raw::{c_char, c_int};
 use std::sync::Mutex;
 use std::sync::Once;
+use std::slice;
 
-use crate::{ffi, mem, ClassId, ContextRef, ForeignTypeRef, Prop, Runtime, UnsafeCFunction};
+use crate::{ffi, mem, ClassId, ContextRef, ForeignTypeRef, Prop, Runtime, UnsafeCFunction, RJSTimerHandler, MsgType, Value, RuffCtx, NewValue};
 
 lazy_static! {
     static ref QRUFF_TIMER_CLASS_ID: ClassId = Runtime::new_class_id();
@@ -14,13 +15,39 @@ fn qruff_timer_class_id() -> ClassId {
     *QRUFF_TIMER_CLASS_ID
 }
 
-unsafe extern "C" fn qruff_test(
+unsafe extern "C" fn qruff_setTimeout(
     ctx: *mut ffi::JSContext,
     this_val: ffi::JSValue,
     argc: ::std::os::raw::c_int,
     argv: *mut ffi::JSValue,
 ) -> ffi::JSValue {
-    println!("I am in qruff_test");
+    println!("I am in qruff_test argc is {}", argc);
+
+    let ctxt = ContextRef::from_ptr(ctx);
+    let this = Value::from(this_val);
+    let this = this.check_undefined();
+    let args = slice::from_raw_parts(argv, argc as usize);
+    let arg0 = Value::from(args[0]);
+    let arg1 = Value::from(args[1]);
+
+    let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
+    if ctxt.is_function(&arg0) {
+        let delay_ms = ctxt.to_int64(&arg1).unwrap() as u64;
+        unsafe {
+            let handle = RJSTimerHandler::new(
+                ctxt,
+                delay_ms,
+                &Value::from((&arg0).new_value(&ctxt))
+            );
+            println!("Before add timer");
+            ruff_ctx
+                .as_mut()
+                .msg_tx
+                .try_send(MsgType::ADD_TIMER(handle));
+        }
+    } else {
+        println!("Not Function");
+    }
     ffi::UNDEFINED
 }
 
@@ -56,16 +83,16 @@ lazy_static! {
             u: ffi::JSCFunctionListEntry__bindgen_ty_1 { i32: 16 },
         },
         ffi::JSCFunctionListEntry {
-            name: cstr!(test_func).as_ptr(),
+            name: cstr!(setTimeout).as_ptr(),
             prop_flags: (ffi::JS_PROP_WRITABLE | ffi::JS_PROP_CONFIGURABLE) as u8,
             def_type: ffi::JS_DEF_CFUNC as u8,
             magic: 0,
             u: ffi::JSCFunctionListEntry__bindgen_ty_1 {
                 func: ffi::JSCFunctionListEntry__bindgen_ty_1__bindgen_ty_1 {
-                    length: 0 as u8,
+                    length: 2 as u8,
                     cproto: ffi::JSCFunctionEnum::JS_CFUNC_generic as u8,
                     cfunc: ffi::JSCFunctionType {
-                        generic: Some(qruff_test)
+                        generic: Some(qruff_setTimeout)
                     }
                 }
             },
