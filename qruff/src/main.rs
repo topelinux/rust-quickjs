@@ -39,7 +39,7 @@ use qruff_module::{register_timer_class,js_init_module_qruff};
 
 use qjs::{
     ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime,
-    Value, NewValue,Unbindable, ClassId, Prop, UnsafeCFunction
+    Value, NewValue,Unbindable, ClassId, Prop, UnsafeCFunction, RuntimeRef
 };
 
 #[derive(Debug, StructOpt)]
@@ -221,7 +221,7 @@ fn main() -> Result<(), Error> {
 
     ctxt.set_userdata(NonNull::new(&mut ruff_ctx));
 
-    register_timer_class(&rt);
+    //register_timer_class(&rt);
     js_init_module_qruff(&ctxt, "qruff");
     // loader for ES6 modules
     rt.set_module_loader::<()>(None, Some(jsc_module_loader), None);

@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::Once;
 use std::slice;
 
-use crate::{ffi, mem, ClassId, ContextRef, ForeignTypeRef, Prop, Runtime, UnsafeCFunction, RJSTimerHandler, MsgType, Value, RuffCtx, NewValue};
+use crate::{ffi, mem, ClassId, ContextRef, ForeignTypeRef, Prop, Runtime, RuntimeRef, UnsafeCFunction, RJSTimerHandler, MsgType, Value, RuffCtx, NewValue};
 
 lazy_static! {
     static ref QRUFF_TIMER_CLASS_ID: ClassId = Runtime::new_class_id();
@@ -36,7 +36,6 @@ unsafe extern "C" fn qruff_setTimeout(
                 ctxt,
                 delay_ms,
                 &arg0
-                //Value::from((&arg0).new_value(&ctxt))
             );
             ruff_ctx
                 .as_mut()
@@ -49,11 +48,12 @@ unsafe extern "C" fn qruff_setTimeout(
     ffi::UNDEFINED
 }
 
-pub fn register_timer_class(rt: &Runtime) -> bool {
+pub fn register_timer_class(rt: &RuntimeRef) -> bool {
     unsafe extern "C" fn qruff_timer_finalizer(_rt: *mut ffi::JSRuntime, obj: ffi::JSValue) {
         let ptr = ffi::JS_GetOpaque(obj, qruff_timer_class_id());
 
         trace!("free userdata {:p} @ {:?}", ptr, obj.u.ptr);
+        //println!("free userdata {:p} @ {:?}", ptr, obj.u.ptr);
 
         mem::drop(Box::from_raw(ptr));
     }
@@ -116,7 +116,9 @@ unsafe extern "C" fn js_module_dummy_init(
 ) -> c_int {
     let ctxt = ContextRef::from_ptr(_ctx);
 
-    //register_timer_class(ctxt.runtime());
+    if register_timer_class(ctxt.runtime()) {
+        println!("Fail to register Timer Class");
+    }
 
     ffi::JS_SetModuleExportList(_ctx, _m, QRuffTimer.as_ptr() as *mut _, 2)
 }
