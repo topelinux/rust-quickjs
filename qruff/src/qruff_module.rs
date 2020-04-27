@@ -75,7 +75,7 @@ pub fn register_timer_class(rt: &RuntimeRef) -> bool {
         let ptr = ffi::JS_GetOpaque(obj, qruff_timer_class_id());
 
         trace!("free userdata {:p} @ {:?}", ptr, obj.u.ptr);
-        //println!("free userdata {:p} @ {:?}", ptr, obj.u.ptr);
+        println!("free userdata {:p} @ {:?}", ptr, obj.u.ptr);
 
         mem::drop(Box::from_raw(ptr));
     }
@@ -91,6 +91,8 @@ pub fn register_timer_class(rt: &RuntimeRef) -> bool {
         },
     )
 }
+
+type FunctionListTable = [ffi::JSCFunctionListEntry; 3];
 
 lazy_static! {
     static ref QRuffTimer: QRuffFunctionList = QRuffFunctionList(
@@ -136,9 +138,9 @@ lazy_static! {
         ]);
 }
 
-struct QRuffFunctionList([ffi::JSCFunctionListEntry; 3]);
+struct QRuffFunctionList(FunctionListTable);
 impl Deref for QRuffFunctionList {
-    type Target = [ffi::JSCFunctionListEntry; 3];
+    type Target = FunctionListTable;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -158,7 +160,7 @@ unsafe extern "C" fn js_module_dummy_init(
         println!("Fail to register Timer Class");
     }
 
-    ffi::JS_SetModuleExportList(_ctx, _m, QRuffTimer.as_ptr() as *mut _, 3)
+    ffi::JS_SetModuleExportList(_ctx, _m, QRuffTimer.as_ptr() as *mut _, QRuffTimer.0.len() as i32)
 }
 
 pub fn js_init_module_qruff(ctxt: &ContextRef, module_name: &str) {
@@ -171,7 +173,7 @@ pub fn js_init_module_qruff(ctxt: &ContextRef, module_name: &str) {
             ctxt.as_ptr(),
             m.unwrap().as_ptr(),
             QRuffTimer.as_ptr() as *mut _,
-            3
+            QRuffTimer.0.len() as i32
         );
     }
 }
