@@ -24,7 +24,10 @@ let setTimeout = qruff.setTimeout;
 console.log(Object.keys(qruff));
 console.log(qruff.CONST_16);
 
+setTimeout(() => {
+    console.log('Cool Qruff timer 500ms be triggerd');
+}, 500);
 
 setTimeout(() => {
-    console.log('Coll Qruff timer be triggerd');
+    console.log('Cool Qruff timer 2000ms be triggerd');
 }, 2000);

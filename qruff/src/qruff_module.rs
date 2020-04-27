@@ -29,13 +29,15 @@ unsafe extern "C" fn qruff_setTimeout(
     let arg1 = Value::from(args[1]);
 
     let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
+    let id = ruff_ctx.as_mut().id_generator.next_id();
     if ctxt.is_function(&arg0) {
         let delay_ms = ctxt.to_int64(&arg1).unwrap() as u64;
         unsafe {
             let handle = RJSTimerHandler::new(
+                id,
                 ctxt,
                 delay_ms,
-                &arg0
+                &arg0,
             );
             ruff_ctx
                 .as_mut()

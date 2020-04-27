@@ -31,15 +31,15 @@ mod qruff_module;
 mod utils;
 
 use utils::{
-    RJSTimerHandler, RuffCtx, RRId, RRIdManager, fs_readall, setTimeout,
-    jsc_module_loader, eval_buf, MsgType, RespType, fs_readall_async, RJSPromise,
+    RJSTimerHandler, RuffCtx, RRId, RRIdManager, fs_readall,
+    jsc_module_loader, eval_buf, MsgType, RespType, fs_readall_async, RJSPromise,RRIdGenerator
 };
 
 use qruff_module::{register_timer_class,js_init_module_qruff};
 
 use qjs::{
     ffi, Args, Context, ContextRef, ErrorKind, Eval, Local, MallocFunctions, Runtime,
-    Value, NewValue,Unbindable, ClassId, Prop, UnsafeCFunction, RuntimeRef
+    Value, NewValue,Unbindable, ClassId, Prop, UnsafeCFunction, RuntimeRef,
 };
 
 #[derive(Debug, StructOpt)]
@@ -193,7 +193,8 @@ fn main() -> Result<(), Error> {
     pretty_env_logger::init();
 
     let (mut msg_tx, mut msg_rx) = channel::<MsgType>(256);
-    let mut ruff_ctx = RuffCtx::new(msg_tx);
+    let id_generator = RRIdGenerator::new();
+    let mut ruff_ctx = RuffCtx::new(msg_tx, id_generator);
     let mut timer_queue: DelayQueue<RJSTimerHandler> = DelayQueue::new();
     let mut resoure_manager = RRIdManager::new();
 
@@ -258,7 +259,7 @@ globalThis.os = os;
             .unwrap();
 
         let fs_readall = ctxt.new_c_function(fs_readall, Some("fs_readall"), 1).unwrap();
-        let os_setTimeout = ctxt.new_c_function(setTimeout, Some("os_setTimeout"), 2).unwrap();
+        //let os_setTimeout = ctxt.new_c_function(setTimeout, Some("os_setTimeout"), 2).unwrap();
 
         //let value = ctxt.new_object();
         //let ru = ctxt.bind(&value);
@@ -266,7 +267,7 @@ globalThis.os = os;
 
         let ru = ctxt.to_local(ctxt.new_object());
         ru.set_property("fs_readall", fs_readall).unwrap();
-        ru.set_property("setTimeout", os_setTimeout).unwrap();
+        //ru.set_property("setTimeout", os_setTimeout).unwrap();
 
         ctxt.global_object().set_property("ru", ru).unwrap();
 

@@ -76,6 +76,7 @@ pub async fn fs_readall_async(path: String, mut tx: Sender<RespType>, job_id: u3
 }
 
 pub struct RJSPromise<'a> {
+    id: u32,
     ctxt: &'a ContextRef,
     p: Local<'a, Value>,
     resolve: Local<'a, Value>,
@@ -83,8 +84,9 @@ pub struct RJSPromise<'a> {
 }
 
 impl<'a> RJSPromise<'a> {
-    pub unsafe fn new(ctxt: &'a ContextRef, p: &Value, resolve: &Value, reject: &Value) -> Self {
+    pub unsafe fn new(id: u32, ctxt: &'a ContextRef, p: &Value, resolve: &Value, reject: &Value) -> Self {
         Self {
+            id,
             ctxt,
             p: ctxt.clone_value(p),
             resolve: ctxt.clone_value(resolve),
@@ -101,10 +103,10 @@ impl<'a> Drop for RJSPromise<'a> {
 }
 
 pub struct RJSTimerHandler<'a> {
+    pub id: u32,
     pub ctxt: &'a ContextRef,
     pub callback: Local<'a, Value>,
     pub delay_ms: u64,
-    pub id: u32,
 }
 
 //impl<'a> Drop for RJSTimerHandler<'a> {
@@ -115,24 +117,26 @@ pub struct RJSTimerHandler<'a> {
 
 
 impl<'a> RJSTimerHandler<'a> {
-    pub unsafe fn new(ctxt: &'a ContextRef, delay_ms: u64, callback: &Value) -> Self {
+    pub unsafe fn new(id: u32, ctxt: &'a ContextRef, delay_ms: u64, callback: &Value) -> Self {
         Self {
+            id,
             ctxt,
             delay_ms,
             callback: ctxt.clone_value(callback),
-            id: 0
         }
     }
 }
 
 pub struct RuffCtx<'a> {
     pub msg_tx: Sender<MsgType<'a>>,
+    pub id_generator: RRIdGenerator,
 }
 
 impl RuffCtx<'static> {
-    pub fn new(msg_tx: Sender<MsgType<'static>>) -> Self {
+    pub fn new(msg_tx: Sender<MsgType<'static>>, id_generator: RRIdGenerator) -> Self {
         RuffCtx {
             msg_tx,
+            id_generator,
         }
     }
 }
@@ -143,8 +147,20 @@ pub enum RRId {
     Promise(u32),
 }
 
+pub struct RRIdGenerator(u32);
+
+impl RRIdGenerator {
+    pub fn new() -> Self {
+        RRIdGenerator(0)
+    }
+    pub fn next_id(&mut self) -> u32 {
+        let ret = self.0;
+        self.0 += 1;
+        ret
+    }
+}
+
 pub struct RRIdManager<'a> {
-    inner_cur_id: u32,
     pending_job: HashMap<u32, RJSPromise<'a>>,
     pending_timer: HashMap<u32, delay_queue::Key>
 }
@@ -152,16 +168,9 @@ pub struct RRIdManager<'a> {
 impl<'a> RRIdManager<'a> {
     pub fn new() -> Self {
         Self {
-            inner_cur_id: 0,
             pending_job: HashMap::new(),
             pending_timer: HashMap::new()
         }
-    }
-
-    fn next_id(&mut self) -> u32 {
-        let ret = self.inner_cur_id;
-        self.inner_cur_id += 1;
-        ret
     }
 
     pub fn handle_msg(
@@ -172,15 +181,14 @@ impl<'a> RRIdManager<'a> {
     ) -> Option<RRId> {
         match msg {
             Some(MsgType::FS_READALL(path, promise)) => {
-                let id = self.next_id();
+                let id = promise.id;
                 self.pending_job.insert(id, promise);
                 tokio::spawn(fs_readall_async(path, resp_tx.clone(), id));
                 Some(RRId::Promise(id))
             }
             Some(MsgType::ADD_TIMER(mut handle)) => {
                 let delay_ms: u64 = handle.delay_ms;
-                let id = self.next_id();
-                handle.id = id;
+                let id = handle.id;
                 let key = timer_queue.insert(handle, Duration::from_millis(delay_ms));
                 self.pending_timer.insert(id, key);
                 Some(RRId::Timer(id))
@@ -242,6 +250,7 @@ impl<'a> RRIdManager<'a> {
     }
 
     pub fn handle_timer(&mut self, handle: RJSTimerHandler) {
+        println!("rrid is {}", handle.id);
         handle.callback.call(None, [0;0]);
         self.pending_timer.remove(&handle.id);
     }
@@ -262,9 +271,11 @@ pub fn fs_readall(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> f
     println!("In Rust Function path is {}", path);
     let rfunc: [ffi::JSValue; 2] = [ffi::UNDEFINED; 2];
     let ret = unsafe {
+        let id = ruff_ctx.as_mut().id_generator.next_id();
         let promise =
             ffi::JS_NewPromiseCapability(ctxt.as_ptr(), rfunc.as_ptr() as *mut _);
         let handle = RJSPromise::new(
+            id,
             ctxt,
             &Value::from(promise),
             &Value::from(rfunc[0]),
@@ -281,22 +292,22 @@ pub fn fs_readall(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> f
     ret
 }
 
-pub fn setTimeout(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> ffi::JSValue {
-    let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
-    if ctxt.is_function(&args[0]) {
-        let delay_ms = ctxt.to_int64(&args[1]).unwrap() as u64;
-        unsafe {
-            let handle = RJSTimerHandler::new(
-                ctxt,
-                delay_ms,
-                &args[0],
-            );
-            ruff_ctx
-                .as_mut()
-                .msg_tx
-                .try_send(MsgType::ADD_TIMER(handle));
-        }
-    }
-    ffi::UNDEFINED
-}
+//pub fn setTimeout(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> ffi::JSValue {
+//    let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
+//    if ctxt.is_function(&args[0]) {
+//        let delay_ms = ctxt.to_int64(&args[1]).unwrap() as u64;
+//        unsafe {
+//            let handle = RJSTimerHandler::new(
+//                ctxt,
+//                delay_ms,
+//                &args[0],
+//            );
+//            ruff_ctx
+//                .as_mut()
+//                .msg_tx
+//                .try_send(MsgType::ADD_TIMER(handle));
+//        }
+//    }
+//    ffi::UNDEFINED
+//}
 

@@ -1,3 +1,7 @@
+import * as qruff from "qruff";
+
+let setTimeout = qruff.setTimeout;
+
 async function test_fs() {
     let d = await ru.fs_readall("./tests/test_fs.js");
     console.log('value is', d);
@@ -9,12 +13,12 @@ console.log('in test_timer');
 function test_timer()
 {
     //var th, i;
-    ru.setTimeout((item)=> {
+    setTimeout((item)=> {
         console.log('hi i am trigger');
         console.log('item is', item);
     }, 1000);
 
-    ru.setTimeout((item)=> {
+    setTimeout((item)=> {
         console.log('hi i am trigger');
         console.log('item is', item);
     }, 2000);
