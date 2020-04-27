@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::Once;
 use std::slice;
 
-use crate::{ffi, mem, ClassId, ContextRef, ForeignTypeRef, Prop, Runtime, RuntimeRef, UnsafeCFunction, RJSTimerHandler, MsgType, Value, RuffCtx, NewValue};
+use crate::{ffi, mem, ClassId, ContextRef, ForeignTypeRef, Prop, Runtime, RuntimeRef, UnsafeCFunction, RJSTimerHandler, MsgType, Value, RuffCtx, NewValue, NonNull};
 
 lazy_static! {
     static ref QRUFF_TIMER_CLASS_ID: ClassId = Runtime::new_class_id();
@@ -13,6 +13,22 @@ lazy_static! {
 
 fn qruff_timer_class_id() -> ClassId {
     *QRUFF_TIMER_CLASS_ID
+}
+
+unsafe extern "C" fn qruff_clearTimeout(
+    ctx: *mut ffi::JSContext,
+    this_val: ffi::JSValue,
+    argc: ::std::os::raw::c_int,
+    argv: *mut ffi::JSValue,
+) -> ffi::JSValue {
+    let ctxt = ContextRef::from_ptr(ctx);
+    let args = slice::from_raw_parts(argv, argc as usize);
+    let timer = Value::from(args[0]);
+
+    let ptr = timer.get_opaque::<u32>(*QRUFF_TIMER_CLASS_ID);
+
+    println!("clearTimeout id is {}", *ptr);
+    ffi::UNDEFINED
 }
 
 unsafe extern "C" fn qruff_setTimeout(
@@ -30,6 +46,9 @@ unsafe extern "C" fn qruff_setTimeout(
 
     let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
     let id = ruff_ctx.as_mut().id_generator.next_id();
+    let ptr = Box::into_raw(Box::new(id));
+    let timer = ctxt.new_object_class(*QRUFF_TIMER_CLASS_ID);
+    timer.set_opaque(ptr);
     if ctxt.is_function(&arg0) {
         let delay_ms = ctxt.to_int64(&arg1).unwrap() as u64;
         unsafe {
@@ -46,8 +65,9 @@ unsafe extern "C" fn qruff_setTimeout(
         }
     } else {
         println!("Not Function");
+        return ffi::UNDEFINED
     }
-    ffi::UNDEFINED
+    *timer
 }
 
 pub fn register_timer_class(rt: &RuntimeRef) -> bool {
@@ -96,15 +116,31 @@ lazy_static! {
                     }
                 }
             },
+        },
+        ffi::JSCFunctionListEntry {
+            name: cstr!(clearTimeout).as_ptr(),
+            prop_flags: (ffi::JS_PROP_WRITABLE | ffi::JS_PROP_CONFIGURABLE) as u8,
+            def_type: ffi::JS_DEF_CFUNC as u8,
+            magic: 0,
+            u: ffi::JSCFunctionListEntry__bindgen_ty_1 {
+                func: ffi::JSCFunctionListEntry__bindgen_ty_1__bindgen_ty_1 {
+                    length: 1 as u8,
+                    cproto: ffi::JSCFunctionEnum::JS_CFUNC_generic as u8,
+                    cfunc: ffi::JSCFunctionType {
+                        generic: Some(qruff_clearTimeout)
+                    }
+                }
+            },
         }
+
         ]);
 }
 
-struct QRuffFunctionList([ffi::JSCFunctionListEntry; 2]);
+struct QRuffFunctionList([ffi::JSCFunctionListEntry; 3]);
 impl Deref for QRuffFunctionList {
-    type Target = [ffi::JSCFunctionListEntry; 2];
+    type Target = [ffi::JSCFunctionListEntry; 3];
 
-    fn deref(&self) -> &[ffi::JSCFunctionListEntry; 2] {
+    fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
@@ -122,7 +158,7 @@ unsafe extern "C" fn js_module_dummy_init(
         println!("Fail to register Timer Class");
     }
 
-    ffi::JS_SetModuleExportList(_ctx, _m, QRuffTimer.as_ptr() as *mut _, 2)
+    ffi::JS_SetModuleExportList(_ctx, _m, QRuffTimer.as_ptr() as *mut _, 3)
 }
 
 pub fn js_init_module_qruff(ctxt: &ContextRef, module_name: &str) {
@@ -135,7 +171,7 @@ pub fn js_init_module_qruff(ctxt: &ContextRef, module_name: &str) {
             ctxt.as_ptr(),
             m.unwrap().as_ptr(),
             QRuffTimer.as_ptr() as *mut _,
-            2,
+            3
         );
     }
 }
