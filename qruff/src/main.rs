@@ -334,6 +334,7 @@ globalThis.os = os;
                     resoure_manager.add_timer(&mut timer_queue, id, timer);
                 }
             }
+            drop(request_timer);
             loop {
                 tokio::select! {
                     msg = msg_rx.recv() => {
