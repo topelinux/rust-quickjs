@@ -8,6 +8,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::null_mut;
 use std::time::Duration;
+use std::rc::Rc;
+use std::sync::Mutex;
 use tokio::fs::File;
 use tokio::prelude::*;
 use tokio::sync::mpsc::{channel, Sender};
@@ -102,6 +104,7 @@ impl<'a> Drop for RJSPromise<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct RJSTimerHandler<'a> {
     pub id: u32,
     pub ctxt: &'a ContextRef,
@@ -127,16 +130,19 @@ impl<'a> RJSTimerHandler<'a> {
     }
 }
 
+type RequestTimer<'a> = Rc<Mutex<Vec<(u32, Option<RJSTimerHandler<'a>>)>>>;
 pub struct RuffCtx<'a> {
     pub msg_tx: Sender<MsgType<'a>>,
     pub id_generator: RRIdGenerator,
+    pub request_timer: RequestTimer<'a>,
 }
 
-impl RuffCtx<'static> {
-    pub fn new(msg_tx: Sender<MsgType<'static>>, id_generator: RRIdGenerator) -> Self {
+impl<'a> RuffCtx<'a> {
+    pub fn new(msg_tx: Sender<MsgType<'a>>, id_generator: RRIdGenerator, request_timer: RequestTimer<'a>) -> Self {
         RuffCtx {
             msg_tx,
             id_generator,
+            request_timer,
         }
     }
 }
@@ -165,12 +171,21 @@ pub struct RRIdManager<'a> {
     pending_timer: HashMap<u32, delay_queue::Key>
 }
 
+unsafe impl<'a> Send for RRIdManager<'a> {}
+unsafe impl<'a> Sync for RRIdManager<'a> {}
+
 impl<'a> RRIdManager<'a> {
     pub fn new() -> Self {
         Self {
             pending_job: HashMap::new(),
             pending_timer: HashMap::new()
         }
+    }
+
+    pub fn add_timer(&mut self, timer_queue: &mut DelayQueue<RJSTimerHandler<'a>>, id: u32, timer: RJSTimerHandler<'a>) {
+        let delay_ms: u64 = timer.delay_ms;
+        let key = timer_queue.insert(timer, Duration::from_millis(delay_ms));
+        self.pending_timer.insert(id, key);
     }
 
     pub fn handle_msg(
@@ -186,13 +201,7 @@ impl<'a> RRIdManager<'a> {
                 tokio::spawn(fs_readall_async(path, resp_tx.clone(), id));
                 Some(RRId::Promise(id))
             }
-            Some(MsgType::ADD_TIMER(mut handle)) => {
-                let delay_ms: u64 = handle.delay_ms;
-                let id = handle.id;
-                let key = timer_queue.insert(handle, Duration::from_millis(delay_ms));
-                self.pending_timer.insert(id, key);
-                Some(RRId::Timer(id))
-            }
+            Some(MsgType::ADD_TIMER(mut handle)) => None,
             None => None
         }
     }

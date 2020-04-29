@@ -18,7 +18,10 @@ use std::os::raw::{c_char, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::ptr::NonNull;
 use std::ptr::null_mut;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use std::rc::Rc;
+use std::sync::Mutex;
 use structopt::StructOpt;
 use tokio::fs::File;
 use tokio::prelude::*;
@@ -194,9 +197,10 @@ fn main() -> Result<(), Error> {
 
     let (mut msg_tx, mut msg_rx) = channel::<MsgType>(256);
     let id_generator = RRIdGenerator::new();
-    let mut ruff_ctx = RuffCtx::new(msg_tx, id_generator);
-    let mut timer_queue: DelayQueue<RJSTimerHandler> = DelayQueue::new();
     let mut resoure_manager = RRIdManager::new();
+    let mut request_timer = Rc::new(Mutex::new(Vec::new()));
+    let mut ruff_ctx = RuffCtx::new(msg_tx, id_generator, Rc::clone(&request_timer));
+    let mut timer_queue: DelayQueue<RJSTimerHandler> = DelayQueue::new();
 
     let opt = Opt::from_clap(
         &Opt::clap()
@@ -319,6 +323,17 @@ globalThis.os = os;
         let (mut resp_tx, mut resp_rx) = channel::<RespType>(2);
 
         event_rt.block_on(async {
+            // check new time queue
+            let mut request_timer = request_timer.lock().unwrap();
+            let mut v = request_timer.drain(..);
+            for (id, mut handle) in v {
+                if let Some(timer) = handle.take() {
+                    let delay_ms = timer.delay_ms;
+                    println!("id is {} timeout is {}", id, delay_ms);
+                    //timer_queue.insert(timer, Duration::from_millis(delay_ms));
+                    resoure_manager.add_timer(&mut timer_queue, id, timer);
+                }
+            }
             loop {
                 tokio::select! {
                     msg = msg_rx.recv() => {

@@ -25,9 +25,18 @@ unsafe extern "C" fn qruff_clearTimeout(
     let args = slice::from_raw_parts(argv, argc as usize);
     let timer = Value::from(args[0]);
 
+    let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
     let ptr = timer.get_opaque::<u32>(*QRUFF_TIMER_CLASS_ID);
 
-    println!("clearTimeout id is {}", *ptr);
+    let id: u32 = *ptr;
+    println!("clear timer id is {:?}", id);
+    let mut request_timer = ruff_ctx.as_mut().request_timer.lock().unwrap();
+    for i in 0..request_timer.len() {
+        if request_timer[i].0 == id {
+            request_timer.remove(i);
+            break;
+        }
+    }
     ffi::UNDEFINED
 }
 
@@ -58,10 +67,8 @@ unsafe extern "C" fn qruff_setTimeout(
                 delay_ms,
                 &arg0,
             );
-            ruff_ctx
-                .as_mut()
-                .msg_tx
-                .try_send(MsgType::ADD_TIMER(handle));
+            let mut request_timer = ruff_ctx.as_mut().request_timer.lock().unwrap();
+            request_timer.push((id, Some(handle)));
         }
     } else {
         println!("Not Function");
