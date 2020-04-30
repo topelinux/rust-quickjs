@@ -25,7 +25,7 @@ console.log(Object.keys(qruff));
 console.log(qruff.CONST_16);
 
 let a = setTimeout(() => {
-    console.log('Cool Qruff timer 500ms be triggerd');
+    console.log('Cool Qruff timer 5000ms be triggerd');
 }, 5000);
 
 let b = os.setTimeout(() => {}, 2000);
@@ -36,6 +36,6 @@ let b = os.setTimeout(() => {}, 2000);
 //console.log('time b is', b.constructor.name);
 let c = setTimeout(() => {
     console.log('Cool Qruff timer 2000ms be triggerd');
+    qruff.clearTimeout(a);
 }, 2000);
 
-qruff.clearTimeout(a);

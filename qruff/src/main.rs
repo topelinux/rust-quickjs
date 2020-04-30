@@ -35,7 +35,7 @@ mod utils;
 
 use utils::{
     RJSTimerHandler, RuffCtx, RRId, RRIdManager, fs_readall,
-    jsc_module_loader, eval_buf, MsgType, RespType, fs_readall_async, RJSPromise,RRIdGenerator
+    jsc_module_loader, eval_buf, MsgType, RespType, fs_readall_async, RJSPromise,RRIdGenerator,TimerOp, check_timer_queue
 };
 
 use qruff_module::{register_timer_class,js_init_module_qruff};
@@ -323,19 +323,9 @@ globalThis.os = os;
         let (mut resp_tx, mut resp_rx) = channel::<RespType>(2);
 
         event_rt.block_on(async {
-            // check new time queue
-            let mut request_timer = request_timer.lock().unwrap();
-            let mut v = request_timer.drain(..);
-            for (id, mut handle) in v {
-                if let Some(timer) = handle.take() {
-                    let delay_ms = timer.delay_ms;
-                    println!("id is {} timeout is {}", id, delay_ms);
-                    //timer_queue.insert(timer, Duration::from_millis(delay_ms));
-                    resoure_manager.add_timer(&mut timer_queue, id, timer);
-                }
-            }
-            drop(request_timer);
             loop {
+                // check new time queue
+                check_timer_queue(&mut request_timer, &mut timer_queue, &mut resoure_manager);
                 tokio::select! {
                     msg = msg_rx.recv() => {
                         let ret = resoure_manager.handle_msg(msg, resp_tx.clone(), &mut timer_queue);
@@ -360,6 +350,8 @@ globalThis.os = os;
                         }
                     },
                 }
+                check_timer_queue(&mut request_timer, &mut timer_queue, &mut resoure_manager);
+
                 loop {
                     match rt.execute_pending_job() {
                         Ok(None) => break,

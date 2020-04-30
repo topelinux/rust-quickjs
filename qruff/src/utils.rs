@@ -130,7 +130,13 @@ impl<'a> RJSTimerHandler<'a> {
     }
 }
 
-type RequestTimer<'a> = Rc<Mutex<Vec<(u32, Option<RJSTimerHandler<'a>>)>>>;
+#[derive(Debug)]
+pub enum TimerOp {
+    Add(u32),
+    Delete(u32),
+}
+
+type RequestTimer<'a> = Rc<Mutex<Vec<(TimerOp, Option<RJSTimerHandler<'a>>)>>>;
 pub struct RuffCtx<'a> {
     pub msg_tx: Sender<MsgType<'a>>,
     pub id_generator: RRIdGenerator,
@@ -186,6 +192,15 @@ impl<'a> RRIdManager<'a> {
         let delay_ms: u64 = timer.delay_ms;
         let key = timer_queue.insert(timer, Duration::from_millis(delay_ms));
         self.pending_timer.insert(id, key);
+    }
+
+    pub fn del_timer(&mut self, timer_queue: &mut DelayQueue<RJSTimerHandler<'a>>, id: u32) {
+        if let Some(key) = self.pending_timer.remove(&id) {
+            println!("delete timer id {}", id);
+            let item = timer_queue.remove(&key);
+        } else {
+            println!("Invalid id {} for delete", id);
+        }
     }
 
     pub fn handle_msg(
@@ -269,6 +284,18 @@ impl<'a> RRIdManager<'a> {
             self.pending_job.is_empty()
         } else {
             false
+        }
+    }
+}
+
+pub fn check_timer_queue<'a>(request_timer: &mut RequestTimer<'a>, timer_queue: &mut DelayQueue<RJSTimerHandler<'a>>, resoure_manager: &mut RRIdManager<'a>) {
+    let mut request_timer = request_timer.lock().unwrap();
+    //println!("in check time is {:?}", request_timer);
+    let mut v = request_timer.drain(..);
+    for (op, mut handle) in v {
+        match op {
+            TimerOp::Add(id) => resoure_manager.add_timer(timer_queue, id, handle.unwrap()),
+            TimerOp::Delete(id) => resoure_manager.del_timer(timer_queue, id),
         }
     }
 }
