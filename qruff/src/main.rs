@@ -11,10 +11,9 @@ extern crate lazy_static;
 use failure::Error;
 use foreign_types::ForeignTypeRef;
 use foreign_types_shared::ForeignTypeRef as OtherForeignTypeRef;
-use std::error::Error as StdError;
 use std::ffi::{CStr, OsStr};
 use std::mem;
-use std::os::raw::{c_char, c_void};
+use std::os::raw::c_void;
 use std::os::unix::ffi::OsStrExt;
 use std::ptr::NonNull;
 use std::ptr::null_mut;
@@ -35,7 +34,7 @@ mod utils;
 
 use utils::{
     RJSTimerHandler, RuffCtx, RRId, RRIdManager, fs_readall,
-    jsc_module_loader, eval_buf, MsgType, RespType, fs_readall_async, RJSPromise,RRIdGenerator,TimerOp, check_timer_queue
+    jsc_module_loader, eval_buf, MsgType, RespType, RJSPromise,RRIdGenerator,check_msg_queue
 };
 
 use qruff_module::{register_timer_class,js_init_module_qruff};
@@ -198,8 +197,8 @@ fn main() -> Result<(), Error> {
     let (mut msg_tx, mut msg_rx) = channel::<MsgType>(256);
     let id_generator = RRIdGenerator::new();
     let mut resoure_manager = RRIdManager::new();
-    let mut request_timer = Rc::new(Mutex::new(Vec::new()));
-    let mut ruff_ctx = RuffCtx::new(msg_tx, id_generator, Rc::clone(&request_timer));
+    let mut request_msg = Rc::new(Mutex::new(Vec::new()));
+    let mut ruff_ctx = RuffCtx::new(msg_tx, id_generator, Rc::clone(&request_msg));
     let mut timer_queue: DelayQueue<RJSTimerHandler> = DelayQueue::new();
 
     let opt = Opt::from_clap(
@@ -322,14 +321,13 @@ globalThis.os = os;
 
         let (mut resp_tx, mut resp_rx) = channel::<RespType>(2);
 
+
         event_rt.block_on(async {
             loop {
                 // check new time queue
-                check_timer_queue(&mut request_timer, &mut timer_queue, &mut resoure_manager);
+                check_msg_queue(&mut request_msg, &mut timer_queue, &mut resoure_manager, &mut resp_tx);
+
                 tokio::select! {
-                    msg = msg_rx.recv() => {
-                        let ret = resoure_manager.handle_msg(msg, resp_tx.clone(), &mut timer_queue);
-                    },
                     mut resp = resp_rx.recv() => {
                         resoure_manager.handle_response(resp);
                     },
@@ -350,7 +348,8 @@ globalThis.os = os;
                         }
                     },
                 }
-                check_timer_queue(&mut request_timer, &mut timer_queue, &mut resoure_manager);
+
+                check_msg_queue(&mut request_msg, &mut timer_queue, &mut resoure_manager, &mut resp_tx);
 
                 loop {
                     match rt.execute_pending_job() {
@@ -362,6 +361,9 @@ globalThis.os = os;
                         }
                     }
                 }
+
+                check_msg_queue(&mut request_msg, &mut timer_queue, &mut resoure_manager, &mut resp_tx);
+
                 if resoure_manager.is_empty() {
                     break;
                 }

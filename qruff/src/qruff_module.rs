@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::Once;
 use std::slice;
 
-use crate::{ffi, mem, ClassId, ContextRef, ForeignTypeRef, Prop, Runtime, RuntimeRef, UnsafeCFunction, RJSTimerHandler, MsgType, Value, RuffCtx, NewValue, NonNull, TimerOp};
+use crate::{ffi, mem, ClassId, ContextRef, ForeignTypeRef, Prop, Runtime, RuntimeRef, UnsafeCFunction, RJSTimerHandler, MsgType, Value, RuffCtx, NewValue, NonNull};
 
 lazy_static! {
     static ref QRUFF_TIMER_CLASS_ID: ClassId = Runtime::new_class_id();
@@ -30,8 +30,8 @@ unsafe extern "C" fn qruff_clearTimeout(
 
     let id: u32 = *ptr;
     println!("clear timer id is {:?}", id);
-    let mut request_timer = ruff_ctx.as_mut().request_timer.lock().unwrap();
-    request_timer.push((TimerOp::Delete(id), None));
+    let mut request_msg = ruff_ctx.as_mut().request_msg.lock().unwrap();
+    request_msg.push(MsgType::DeleteTimer(id));
     ffi::UNDEFINED
 }
 
@@ -62,8 +62,8 @@ unsafe extern "C" fn qruff_setTimeout(
                 delay_ms,
                 &arg0,
             );
-            let mut request_timer = ruff_ctx.as_mut().request_timer.lock().unwrap();
-            request_timer.push((TimerOp::Add(id), Some(handle)));
+            let mut request_msg = ruff_ctx.as_mut().request_msg.lock().unwrap();
+            request_msg.push(MsgType::AddTimer(id, handle));
         }
     } else {
         println!("Not Function");

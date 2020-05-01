@@ -50,16 +50,6 @@ pub fn eval_buf<'a>(
     }
 }
 
-pub enum MsgType<'a> {
-    FS_READALL(String, RJSPromise<'a>),
-    ADD_TIMER(RJSTimerHandler<'a>),
-}
-
-#[derive(Debug)]
-pub enum RespType {
-    FS_RESPONSE(u32, Result<Vec<u8>, Error>),
-}
-
 pub async fn fs_readall_async(path: String, mut tx: Sender<RespType>, job_id: u32) {
     println!("path is {:?}", path);
     let mut file = match File::open(path).await {
@@ -77,6 +67,7 @@ pub async fn fs_readall_async(path: String, mut tx: Sender<RespType>, job_id: u3
     tx.send(RespType::FS_RESPONSE(job_id, Ok(contents))).await;
 }
 
+#[derive(Debug)]
 pub struct RJSPromise<'a> {
     id: u32,
     ctxt: &'a ContextRef,
@@ -112,12 +103,6 @@ pub struct RJSTimerHandler<'a> {
     pub delay_ms: u64,
 }
 
-//impl<'a> Drop for RJSTimerHandler<'a> {
-    //fn drop(&mut self) {
-    //    self.ctxt.free_value(self.callback.raw());
-    //}
-//}
-
 
 impl<'a> RJSTimerHandler<'a> {
     pub unsafe fn new(id: u32, ctxt: &'a ContextRef, delay_ms: u64, callback: &Value) -> Self {
@@ -131,24 +116,31 @@ impl<'a> RJSTimerHandler<'a> {
 }
 
 #[derive(Debug)]
-pub enum TimerOp {
-    Add(u32),
-    Delete(u32),
+pub enum MsgType<'a> {
+    AddTimer(u32,RJSTimerHandler<'a>),
+    DeleteTimer(u32),
+    FS_READALL(u32, String, RJSPromise<'a>),
 }
 
-type RequestTimer<'a> = Rc<Mutex<Vec<(TimerOp, Option<RJSTimerHandler<'a>>)>>>;
+#[derive(Debug)]
+pub enum RespType {
+    FS_RESPONSE(u32, Result<Vec<u8>, Error>),
+}
+
+type RequestMsg<'a> = Rc<Mutex<Vec<MsgType<'a>>>>;
+
 pub struct RuffCtx<'a> {
     pub msg_tx: Sender<MsgType<'a>>,
     pub id_generator: RRIdGenerator,
-    pub request_timer: RequestTimer<'a>,
+    pub request_msg: RequestMsg<'a>,
 }
 
 impl<'a> RuffCtx<'a> {
-    pub fn new(msg_tx: Sender<MsgType<'a>>, id_generator: RRIdGenerator, request_timer: RequestTimer<'a>) -> Self {
+    pub fn new(msg_tx: Sender<MsgType<'a>>, id_generator: RRIdGenerator, request_msg: RequestMsg<'a>) -> Self {
         RuffCtx {
             msg_tx,
             id_generator,
-            request_timer,
+            request_msg,
         }
     }
 }
@@ -203,22 +195,8 @@ impl<'a> RRIdManager<'a> {
         }
     }
 
-    pub fn handle_msg(
-        &mut self,
-        mut msg: Option<MsgType<'a>>,
-        mut resp_tx: Sender<RespType>,
-        timer_queue: &mut DelayQueue<RJSTimerHandler<'a>>
-    ) -> Option<RRId> {
-        match msg {
-            Some(MsgType::FS_READALL(path, promise)) => {
-                let id = promise.id;
-                self.pending_job.insert(id, promise);
-                tokio::spawn(fs_readall_async(path, resp_tx.clone(), id));
-                Some(RRId::Promise(id))
-            }
-            Some(MsgType::ADD_TIMER(mut handle)) => None,
-            None => None
-        }
+    pub fn add_promise(&mut self, id: u32, promise: RJSPromise<'a>) {
+        self.pending_job.insert(id, promise);
     }
 
     pub fn handle_response(&mut self, mut resp: Option<RespType>) {
@@ -288,14 +266,20 @@ impl<'a> RRIdManager<'a> {
     }
 }
 
-pub fn check_timer_queue<'a>(request_timer: &mut RequestTimer<'a>, timer_queue: &mut DelayQueue<RJSTimerHandler<'a>>, resoure_manager: &mut RRIdManager<'a>) {
-    let mut request_timer = request_timer.lock().unwrap();
-    //println!("in check time is {:?}", request_timer);
-    let mut v = request_timer.drain(..);
-    for (op, mut handle) in v {
-        match op {
-            TimerOp::Add(id) => resoure_manager.add_timer(timer_queue, id, handle.unwrap()),
-            TimerOp::Delete(id) => resoure_manager.del_timer(timer_queue, id),
+pub fn check_msg_queue<'a>(request_msg: &mut RequestMsg<'a>,
+                           timer_queue: &mut DelayQueue<RJSTimerHandler<'a>>,
+                           resoure_manager: &mut RRIdManager<'a>,
+                           resp_tx: &mut Sender<RespType>) {
+    let mut request_msg = request_msg.lock().unwrap();
+    let mut v = request_msg.drain(..);
+    for msg in v {
+        match msg{
+            MsgType::AddTimer(id, handle) => resoure_manager.add_timer(timer_queue, id, handle),
+            MsgType::DeleteTimer(id) => resoure_manager.del_timer(timer_queue, id),
+            MsgType::FS_READALL(id, path, promise) => {
+                tokio::spawn(fs_readall_async(path, resp_tx.clone(), id));
+                resoure_manager.add_promise(id, promise)
+            }
         }
     }
 }
@@ -318,32 +302,9 @@ pub fn fs_readall(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> f
             &Value::from(rfunc[1]),
         );
 
-        ruff_ctx
-            .as_mut()
-            .msg_tx
-            .try_send(MsgType::FS_READALL(String::from(path), handle));
-        //.expect("Fail to send msg");
+        let mut request_msg = ruff_ctx.as_mut().request_msg.lock().unwrap();
+        request_msg.push(MsgType::FS_READALL(id, String::from(path), handle));
         promise
     };
     ret
 }
-
-//pub fn setTimeout(ctxt: &ContextRef, _this: Option<&Value>, args: &[Value]) -> ffi::JSValue {
-//    let mut ruff_ctx = ctxt.userdata::<RuffCtx>().unwrap();
-//    if ctxt.is_function(&args[0]) {
-//        let delay_ms = ctxt.to_int64(&args[1]).unwrap() as u64;
-//        unsafe {
-//            let handle = RJSTimerHandler::new(
-//                ctxt,
-//                delay_ms,
-//                &args[0],
-//            );
-//            ruff_ctx
-//                .as_mut()
-//                .msg_tx
-//                .try_send(MsgType::ADD_TIMER(handle));
-//        }
-//    }
-//    ffi::UNDEFINED
-//}
-
