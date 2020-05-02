@@ -1,7 +1,7 @@
-Qruff
+Quicjs Wrapper
 ----
 
-Rust JS Runtime with quickjs engine and tokio as event loop, leverage rust-quickjsas as quickjs wrapper
+quickjs wrapper for QRuff
 
 ## Cravete
 
@@ -9,12 +9,4 @@ Just in Demo stage
 
 ## Usage
 
-```
-cargo run -p qruff
-```
-
-## Example
-
-```
-cargo run -p qruff ./tests/test_timer.js
-```
+please refer to [QRuff](https://github.com/topelinux/qruff)
